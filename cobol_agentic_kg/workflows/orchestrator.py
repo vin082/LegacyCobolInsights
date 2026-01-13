@@ -1,5 +1,15 @@
 """
 Orchestrator - Main workflow coordinator using LangGraph
+
+Workflow Paths:
+1. File Processing: ingestion → validation → parsing → enrichment → graph_builder
+2. Query Path: cypher_generator → retrieval
+3. Document Generation: Standalone (operates on KG)
+4. Modernization Analysis: Standalone (operates on KG)
+
+Note: Document Generator and Modernization Agent are standalone agents that
+query the knowledge graph directly. They are invoked independently from the UI
+rather than as part of the file processing pipeline.
 """
 from langgraph.graph import StateGraph, END
 from utils.state import CobolProcessingState, create_initial_state
@@ -10,6 +20,8 @@ from agents.enrichment import enrichment_agent_node
 from agents.graph_builder import graph_builder_agent_node
 from agents.cypher_gen import cypher_generator_agent_node
 from agents.retrieval import retrieval_agent_node
+# Note: document_generator and modernization are standalone agents
+# They are imported and used directly in ui/app.py, not in the workflow
 from utils.logger import logger
 
 
@@ -20,11 +32,25 @@ class CobolWorkflowOrchestrator:
         self.workflow = self._build_workflow()
 
     def _build_workflow(self) -> StateGraph:
-        """Build the LangGraph workflow"""
+        """
+        Build the LangGraph workflow for COBOL file processing
+
+        This workflow handles the core file processing pipeline:
+        - Ingestion: Load COBOL files
+        - Validation: Check COBOL syntax
+        - Parsing: Extract program structure
+        - Enrichment: Add LLM insights
+        - Graph Building: Create Neo4j nodes/relationships
+        - Query: Optional natural language queries
+
+        Note: Document Generation and Modernization Analysis are NOT part of
+        this workflow. They are standalone agents that operate on the populated
+        knowledge graph and are invoked directly from the UI.
+        """
 
         workflow = StateGraph(CobolProcessingState)
 
-        # Add agent nodes
+        # Add agent nodes for file processing pipeline
         workflow.add_node("ingestion", ingestion_agent_node)
         workflow.add_node("validation", validation_agent_node)
         workflow.add_node("parsing", parsing_agent_node)

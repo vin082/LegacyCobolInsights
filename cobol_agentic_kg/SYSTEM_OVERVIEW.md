@@ -8,10 +8,24 @@ A production-ready **multi-agent system** for analyzing COBOL codebases, buildin
 
 ### **9 Specialized Agents**
 
+**Architecture Overview:**
+
+The system uses two operational patterns:
+
+1. **File Processing Pipeline** (LangGraph Workflow)
+   - Sequential processing of COBOL files
+   - Agents 1-7: Ingestion → Validation → Parsing → Enrichment → Graph Building → Query
+
+2. **Knowledge Graph Analysis** (Standalone Agents)
+   - Agents 8-9: Document Generator and Modernization Advisor
+   - Operate on populated knowledge graph
+   - Invoked independently from UI
+
 ```
+FILE PROCESSING PIPELINE (LangGraph Workflow)
 ┌─────────────────────────────────────────────────────────────────┐
 │                    ORCHESTRATOR (LangGraph)                     │
-│            Coordinates workflow & manages state                  │
+│            Coordinates file processing workflow                  │
 └─────────────────────────────────────────────────────────────────┘
                               │
          ┌────────────────────┼────────────────────┐
@@ -29,13 +43,35 @@ A production-ready **multi-agent system** for analyzing COBOL codebases, buildin
                     │  LLM analysis    │
                     └──────────────────┘
                               │
-         ┌────────────────────┼─────────────────┬──────────────┬──────────────┐
-         ▼                    ▼                 ▼              ▼              ▼
-┌──────────────────┐  ┌──────────────────┐  ┌────────────┐  ┌────────────┐  ┌────────────┐
-│  5. GRAPH        │  │  6. CYPHER       │  │7. RETRIEVAL│  │8. DOCUMENT │  │9. MODERN   │
-│  Neo4j builder   │  │  NL→Query gen    │  │Execute &   │  │Generator   │  │-IZATION    │
-│                  │  │                  │  │fetch       │  │            │  │Advisor     │
-└──────────────────┘  └──────────────────┘  └────────────┘  └────────────┘  └────────────┘
+         ┌────────────────────┼────────────────────┐
+         ▼                    ▼                    ▼
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│  5. GRAPH        │  │  6. CYPHER       │  │  7. RETRIEVAL    │
+│  Neo4j builder   │  │  NL→Query gen    │  │  Execute & fetch │
+└──────────────────┘  └──────────────────┘  └──────────────────┘
+         │                                           │
+         └───────────────────┬───────────────────────┘
+                             ▼
+                   ┌─────────────────┐
+                   │   Neo4j KG      │
+                   │  (Populated)    │
+                   └─────────────────┘
+                             │
+         ┌───────────────────┴───────────────────┐
+         │                                       │
+         ▼                                       ▼
+┌──────────────────┐                   ┌──────────────────┐
+│  8. DOCUMENT     │ (STANDALONE)      │  9. MODERNIZATION│ (STANDALONE)
+│  Generator       │ Invoked from UI   │  Advisor         │ Invoked from UI
+│  Queries KG      │                   │  Queries KG      │
+└──────────────────┘                   └──────────────────┘
+```
+
+**Why Standalone?**
+- Document Generator and Modernization Advisor analyze the **entire knowledge graph**, not individual files
+- They require the graph to be **fully populated** before analysis
+- They use different state types (DocumentGenerationState, ModernizationState) vs CobolProcessingState
+- They're invoked **on-demand** from the UI, not as part of the file processing pipeline
 ```
 
 ### **Technology Stack**
