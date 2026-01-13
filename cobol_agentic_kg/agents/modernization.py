@@ -151,12 +151,12 @@ class ModernizationAgent:
         """
 
         try:
-            result = self.neo4j.execute_query(query)
-            programs = [dict(record) for record in result]
+            result = self.neo4j.query(query)
+            programs = result  # Already list of dicts
             logger.info(f"Retrieved {len(programs)} programs for modernization analysis")
             return programs
         except Exception as e:
-            logger.error(f"Error querying Neo4j: {e}")
+            logger.error(f"Error querying Neo4j: {e}", exc_info=True)
             return []
 
     def _analyze_program(self, program: Dict) -> Dict:
