@@ -111,6 +111,40 @@ class DocumentGenerationState(TypedDict):
     timestamp: str  # ISO timestamp
 
 
+class ModernizationState(TypedDict):
+    """
+    State for modernization analysis agent
+    """
+
+    # Analysis configuration
+    filters: Dict[str, Any]  # Optional filters (max_programs, complexity, domain)
+
+    # Processing status
+    status: str  # pending, analyzing, completed, failed
+    errors: Annotated[List[str], operator.add]
+
+    # Output - list of recommendations
+    recommendations: List[Dict[str, Any]]  # Each recommendation contains:
+    # - program_name: str
+    # - domain: str
+    # - complexity: int
+    # - loc: int
+    # - risk_score: float (0-100)
+    # - value_score: float (0-100)
+    # - priority_score: float (0-100)
+    # - strategy: str (Rewrite, Strangler Fig, Retire/Replace, Encapsulate)
+    # - risk_factors: List[str]
+    # - value_factors: List[str]
+    # - recommended_approach: str
+    # - technology_recommendations: List[str]
+    # - estimated_effort: str
+    # - key_considerations: List[str]
+
+    # Metrics
+    analysis_time: float  # Time taken to analyze programs
+    timestamp: str  # ISO timestamp
+
+
 def create_initial_state(file_path: str, file_id: Optional[str] = None) -> CobolProcessingState:
     """
     Create initial state for a COBOL file

@@ -20,6 +20,7 @@ from config.settings import settings
 from utils.cache import get_cache
 from utils.llm_factory import get_available_models, set_llm_provider
 from agents.document_generator import document_generator_agent
+from agents.modernization import ModernizationAgent
 
 # Page configuration
 st.set_page_config(
@@ -71,7 +72,7 @@ def show_sidebar():
 
         page = st.radio(
             "Select Page",
-            ["📊 Dashboard", "📁 Upload Files", "🌐 Clone Repository", "🔍 Query Graph", "📈 Analytics", "📄 Documentation"],
+            ["📊 Dashboard", "📁 Upload Files", "🌐 Clone Repository", "🔍 Query Graph", "📈 Analytics", "📄 Documentation", "🔧 Modernization"],
             label_visibility="collapsed"
         )
 
@@ -677,9 +678,256 @@ def show_documentation():
         st.markdown("""
         - Program Detail Reports
         - Dependency Maps
-        - Modernization Recommendations
         - Word/PDF Export
         """)
+
+
+def show_modernization():
+    """Show modernization analysis and recommendations"""
+    st.markdown('<div class="main-header">🔧 Modernization Analysis</div>', unsafe_allow_html=True)
+
+    st.markdown("""
+    Analyze COBOL programs and receive AI-powered modernization recommendations based on:
+    - **Risk Assessment**: Complexity, coupling, size, and data I/O
+    - **Business Value**: Usage patterns, domain criticality, and integration impact
+    - **Smart Strategies**: Rewrite, Strangler Fig, Retire/Replace, or Encapsulate
+    """)
+
+    # Configuration section
+    st.markdown("### ⚙️ Analysis Configuration")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        max_programs = st.number_input(
+            "Max Programs to Analyze",
+            min_value=1,
+            max_value=100,
+            value=20,
+            help="Limit the number of programs to analyze (fewer = faster)"
+        )
+
+    with col2:
+        complexity_filter = st.selectbox(
+            "Complexity Filter",
+            ["All", "High", "Medium", "Low"],
+            help="Filter by complexity level"
+        )
+
+    # Advanced filters
+    with st.expander("🔍 Advanced Filters", expanded=False):
+        domain_filter = st.text_input(
+            "Domain Filter",
+            placeholder="e.g., Billing, Financial, Customer",
+            help="Filter by business domain (case-insensitive partial match)"
+        )
+
+        st.info("💡 **Tip**: Start with high-complexity or critical-domain programs for maximum impact.")
+
+    # Build filters dictionary
+    filters = {'max_programs': max_programs}
+    if domain_filter:
+        filters['domain'] = domain_filter
+    if complexity_filter != "All":
+        filters['complexity'] = complexity_filter.lower()
+
+    # Analysis button
+    if st.button("🚀 Run Modernization Analysis", type="primary", use_container_width=True):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        try:
+            from datetime import datetime
+            from utils.state import ModernizationState
+
+            status_text.text("📊 Querying knowledge graph...")
+            progress_bar.progress(20)
+
+            # Create state
+            state = ModernizationState(
+                filters=filters,
+                status='pending',
+                errors=[],
+                recommendations=[],
+                analysis_time=0.0,
+                timestamp=datetime.now().isoformat()
+            )
+
+            status_text.text(f"🤖 Analyzing {max_programs} programs with LLM...")
+            progress_bar.progress(40)
+
+            # Run analysis
+            modernization_agent = ModernizationAgent()
+            result = modernization_agent.process(state)
+
+            progress_bar.progress(100)
+            status_text.text("✅ Analysis complete!")
+
+            if result['status'] == 'completed':
+                recommendations = result['recommendations']
+
+                if not recommendations:
+                    st.warning("No programs found matching the specified filters.")
+                    return
+
+                st.success(f"✅ Analyzed {len(recommendations)} programs in {result['analysis_time']:.2f} seconds")
+
+                # Store in session state
+                st.session_state.modernization_results = recommendations
+
+                # Summary metrics
+                st.markdown("### 📊 Analysis Summary")
+
+                col1, col2, col3, col4 = st.columns(4)
+
+                with col1:
+                    st.metric("Programs Analyzed", len(recommendations))
+
+                with col2:
+                    avg_risk = sum(r['risk_score'] for r in recommendations) / len(recommendations)
+                    st.metric("Avg Risk Score", f"{avg_risk:.1f}/100")
+
+                with col3:
+                    avg_value = sum(r['value_score'] for r in recommendations) / len(recommendations)
+                    st.metric("Avg Value Score", f"{avg_value:.1f}/100")
+
+                with col4:
+                    high_priority = sum(1 for r in recommendations if r['priority_score'] >= 70)
+                    st.metric("High Priority", high_priority)
+
+                # Strategy distribution
+                st.markdown("### 📈 Recommended Strategies")
+
+                strategy_counts = {}
+                for rec in recommendations:
+                    strategy = rec['strategy']
+                    strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
+
+                strategy_df = pd.DataFrame([
+                    {'Strategy': k, 'Count': v, 'Percentage': f"{(v/len(recommendations)*100):.1f}%"}
+                    for k, v in strategy_counts.items()
+                ])
+                st.dataframe(strategy_df, use_container_width=True, hide_index=True)
+
+            else:
+                st.error(f"Analysis failed: {', '.join(result['errors'])}")
+
+        except Exception as e:
+            st.error(f"❌ Error during analysis: {str(e)}")
+            progress_bar.empty()
+            status_text.empty()
+
+    # Display recommendations if available
+    if 'modernization_results' in st.session_state and st.session_state.modernization_results:
+        st.markdown("---")
+        st.markdown("### 🎯 Detailed Recommendations")
+
+        recommendations = st.session_state.modernization_results
+
+        # Priority filter
+        priority_filter = st.selectbox(
+            "Filter by Priority",
+            ["All", "High (70+)", "Medium (40-70)", "Low (<40)"],
+            help="Filter recommendations by priority score"
+        )
+
+        filtered_recs = recommendations
+        if priority_filter == "High (70+)":
+            filtered_recs = [r for r in recommendations if r['priority_score'] >= 70]
+        elif priority_filter == "Medium (40-70)":
+            filtered_recs = [r for r in recommendations if 40 <= r['priority_score'] < 70]
+        elif priority_filter == "Low (<40)":
+            filtered_recs = [r for r in recommendations if r['priority_score'] < 40]
+
+        if not filtered_recs:
+            st.info("No recommendations match the selected priority filter.")
+        else:
+            # Display each recommendation in an expander
+            for i, rec in enumerate(filtered_recs, 1):
+                # Color-code by priority
+                if rec['priority_score'] >= 70:
+                    priority_color = "🔴"
+                elif rec['priority_score'] >= 40:
+                    priority_color = "🟡"
+                else:
+                    priority_color = "🟢"
+
+                with st.expander(
+                    f"{priority_color} **{rec['program_name']}** | "
+                    f"Priority: {rec['priority_score']:.1f} | "
+                    f"Strategy: {rec['strategy']}",
+                    expanded=(i <= 3)  # Expand first 3
+                ):
+                    # Header info
+                    col1, col2, col3 = st.columns(3)
+                    with col1:
+                        st.metric("Risk Score", f"{rec['risk_score']:.1f}/100")
+                    with col2:
+                        st.metric("Value Score", f"{rec['value_score']:.1f}/100")
+                    with col3:
+                        st.metric("Priority Score", f"{rec['priority_score']:.1f}/100")
+
+                    # Program details
+                    st.markdown("**Program Details:**")
+                    st.markdown(f"- **Domain**: {rec['domain']}")
+                    st.markdown(f"- **Complexity**: {rec['complexity']}")
+                    st.markdown(f"- **Lines of Code**: {int(rec['loc'])}")
+
+                    # Risk factors
+                    st.markdown("**🚨 Risk Factors:**")
+                    for factor in rec['risk_factors']:
+                        st.markdown(f"- {factor}")
+
+                    # Value factors
+                    st.markdown("**💎 Value Factors:**")
+                    for factor in rec['value_factors']:
+                        st.markdown(f"- {factor}")
+
+                    # Strategy
+                    st.markdown(f"**📋 Recommended Strategy: `{rec['strategy']}`**")
+                    st.markdown(rec['recommended_approach'])
+
+                    # Technologies
+                    st.markdown("**🛠️ Technology Recommendations:**")
+                    for tech in rec['technology_recommendations']:
+                        st.markdown(f"- {tech}")
+
+                    # Effort estimate
+                    st.markdown(f"**⏱️ Estimated Effort:** {rec['estimated_effort']}")
+
+                    # Key considerations
+                    st.markdown("**⚠️ Key Considerations:**")
+                    for consideration in rec['key_considerations']:
+                        st.markdown(f"- {consideration}")
+
+            # Export recommendations
+            st.markdown("---")
+            st.markdown("### 📥 Export Recommendations")
+
+            # Create CSV export
+            export_data = []
+            for rec in filtered_recs:
+                export_data.append({
+                    'Program': rec['program_name'],
+                    'Domain': rec['domain'],
+                    'Complexity': rec['complexity'],
+                    'LOC': int(rec['loc']),
+                    'Risk Score': round(rec['risk_score'], 1),
+                    'Value Score': round(rec['value_score'], 1),
+                    'Priority Score': round(rec['priority_score'], 1),
+                    'Strategy': rec['strategy'],
+                    'Estimated Effort': rec['estimated_effort']
+                })
+
+            export_df = pd.DataFrame(export_data)
+
+            st.download_button(
+                label="📥 Download as CSV",
+                data=export_df.to_csv(index=False),
+                file_name=f"modernization_recommendations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
 
 
 def main():
@@ -699,6 +947,8 @@ def main():
         show_analytics()
     elif page == "📄 Documentation":
         show_documentation()
+    elif page == "🔧 Modernization":
+        show_modernization()
 
 
 if __name__ == "__main__":

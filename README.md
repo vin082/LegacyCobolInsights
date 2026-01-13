@@ -13,9 +13,10 @@
 
 ### Key Capabilities
 
-- **8 Specialized AI Agents** - Autonomous agents for ingestion, validation, parsing, enrichment, graph building, query generation, retrieval, and documentation
+- **9 Specialized AI Agents** - Autonomous agents for ingestion, validation, parsing, enrichment, graph building, query generation, retrieval, documentation, and modernization
 - **Multi-LLM Support** - Choose from OpenAI GPT-4/GPT-5, Groq (free & fast), or Google Gemini for cost-effective processing
 - **Automated Documentation** - Generate comprehensive technical specs and business requirement documents in Markdown or DOCX
+- **Modernization Recommendations** - AI-powered risk/value analysis with migration strategies and technology recommendations
 - **LLM-Powered Analysis** - Semantic understanding of COBOL code with intelligent insights
 - **Knowledge Graph** - Neo4j-based graph database for complex relationships
 - **Natural Language Queries** - Ask questions in plain English, get Cypher queries automatically
@@ -130,7 +131,7 @@ print(f"Program: {result['parsed_data']['program_name']}")
 
 ### 2. Monitor Processing
 
-Track progress through 8 stages:
+Track progress through 9 stages:
 1. Ingestion - File upload and validation
 2. Validation - COBOL syntax checking
 3. Parsing - Structure extraction
@@ -139,6 +140,7 @@ Track progress through 8 stages:
 6. Query Generation - Natural language to Cypher
 7. Retrieval - Execute queries
 8. Documentation - Generate technical specs
+9. Modernization - Analyze and recommend migration strategies
 
 ### 3. Query the Knowledge Graph
 
@@ -176,6 +178,26 @@ ORDER BY p.complexity DESC
 - Filter by "High" complexity for critical programs
 - Use domain filters to focus on specific business areas
 
+### 5. Get Modernization Recommendations
+
+**Via UI:**
+- Select "Modernization" from the sidebar
+- Configure filters (max programs, complexity, domain)
+- Click "Run Modernization Analysis"
+- Review priority-ranked recommendations with:
+  - Risk scores (complexity, coupling, size)
+  - Business value scores (usage, criticality)
+  - Recommended strategies (Rewrite, Strangler Fig, Retire, Encapsulate)
+  - Technology recommendations
+  - Effort estimates
+- Export recommendations as CSV
+
+**Modernization Strategies:**
+- **Rewrite** - High value, low risk programs
+- **Strangler Fig Pattern** - High value, high risk programs (gradual migration)
+- **Retire/Replace** - Low value, low risk programs
+- **Encapsulate & Modernize** - Low value, high risk programs (wrap with APIs)
+
 ## Features in Detail
 
 ### Multi-Agent Architecture
@@ -190,6 +212,7 @@ ORDER BY p.complexity DESC
 | **Cypher Generator** | Convert NL queries to Cypher | LLM, few-shot prompting |
 | **Retrieval** | Execute queries, format results | Neo4j driver |
 | **Document Generator** | Create technical documentation | LLM, python-docx |
+| **Modernization Advisor** | Risk/value analysis, migration strategies | LLM, scoring algorithms |
 
 ### Multi-LLM Provider Support
 
@@ -291,7 +314,7 @@ CONNECTION_TIMEOUT = 30
 ```
 LegacyCobolInsights/
 └── cobol_agentic_kg/
-    ├── agents/              # 8 specialized agents
+    ├── agents/              # 9 specialized agents
     │   ├── ingestion.py
     │   ├── validation.py
     │   ├── parsing.py
@@ -299,7 +322,8 @@ LegacyCobolInsights/
     │   ├── graph_builder.py
     │   ├── cypher_gen.py
     │   ├── retrieval.py
-    │   └── document_generator.py  # NEW
+    │   ├── document_generator.py
+    │   └── modernization.py  # NEW
     ├── workflows/           # LangGraph orchestration
     │   └── orchestrator.py
     ├── utils/               # Shared utilities
