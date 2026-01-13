@@ -18,6 +18,8 @@ from workflows.orchestrator import orchestrator
 from utils.neo4j_client import neo4j_client
 from config.settings import settings
 from utils.cache import get_cache
+from utils.llm_factory import get_available_models, set_llm_provider
+from agents.document_generator import document_generator_agent
 
 # Page configuration
 st.set_page_config(
@@ -69,9 +71,60 @@ def show_sidebar():
 
         page = st.radio(
             "Select Page",
-            ["📊 Dashboard", "📁 Upload Files", "🌐 Clone Repository", "🔍 Query Graph", "📈 Analytics"],
+            ["📊 Dashboard", "📁 Upload Files", "🌐 Clone Repository", "🔍 Query Graph", "📈 Analytics", "📄 Documentation"],
             label_visibility="collapsed"
         )
+
+        st.markdown("---")
+
+        # LLM Provider Selection
+        st.markdown("### 🤖 LLM Configuration")
+
+        available = get_available_models()
+        current_provider = settings.llm_provider
+
+        # Provider selection
+        provider_options = ["openai", "groq", "google"]
+        try:
+            current_index = provider_options.index(current_provider)
+        except ValueError:
+            current_index = 0
+
+        provider = st.selectbox(
+            "Provider",
+            options=provider_options,
+            index=current_index,
+            help="Select LLM provider: OpenAI (paid), Groq (free & fast), Google Gemini (affordable)"
+        )
+
+        # Model selection based on provider
+        if provider != current_provider:
+            set_llm_provider(provider)
+            st.rerun()
+
+        # Get available models for selected provider
+        models_info = get_available_models()
+        current_model = settings.get_llm_model()
+
+        model = st.selectbox(
+            "Model",
+            options=models_info['models'],
+            index=models_info['models'].index(current_model) if current_model in models_info['models'] else 0,
+            help=f"Available models for {provider}"
+        )
+
+        if model != current_model:
+            set_llm_provider(provider, model)
+            st.success(f"✅ Switched to {model}")
+            st.info("💡 Cache is provider-specific. Switching models will generate fresh responses.")
+
+        # Show cost indicator
+        if provider == "groq":
+            st.caption("💰 FREE - Fast inference")
+        elif provider == "google":
+            st.caption("💵 Affordable - Gemini pricing")
+        else:
+            st.caption("💳 Paid - OpenAI pricing")
 
         st.markdown("---")
 
@@ -448,6 +501,187 @@ def show_analytics():
         st.info("No data available")
 
 
+def show_documentation():
+    """Show documentation generation page"""
+    st.markdown('<p class="main-header">📄 Documentation Generator</p>', unsafe_allow_html=True)
+
+    st.markdown("""
+    Generate comprehensive documentation from your COBOL Knowledge Graph insights.
+    Export documentation in various formats for team collaboration and reference.
+    """)
+
+    st.markdown("---")
+
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.markdown("### Document Configuration")
+
+        # Document type selection
+        doc_type = st.selectbox(
+            "Document Type",
+            options=["system_overview"],
+            help="Select the type of document to generate"
+        )
+
+        # Format selection
+        doc_format = st.selectbox(
+            "Format",
+            options=["markdown", "docx"],
+            help="Select output format: Markdown (MD) or Word Document (DOCX)"
+        )
+
+        # Filters and limits
+        st.markdown("### Filters & Scope")
+
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            max_programs = st.number_input(
+                "Max Programs to Document",
+                min_value=1,
+                max_value=50,
+                value=10,
+                help="Limit the number of programs to document (fewer = faster)"
+            )
+
+        with col_b:
+            complexity_filter = st.selectbox(
+                "Complexity Filter",
+                ["All", "High", "Medium", "Low"],
+                help="Filter by complexity level"
+            )
+
+        with st.expander("Advanced Filters", expanded=False):
+            domain_filter = st.text_input("Domain", placeholder="e.g., Billing, Claims")
+
+            st.info("💡 **Performance Tips:**\n"
+                   "- Start with 5-10 programs to test\n"
+                   "- Filter by 'High' complexity to document critical programs first\n"
+                   "- Use domain filter to focus on specific business areas")
+
+        # Generate button
+        st.markdown("---")
+
+        if st.button("🚀 Generate Document", type="primary", use_container_width=True):
+            # Show progress container
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+
+            try:
+                status_text.text("📊 Querying knowledge graph...")
+                progress_bar.progress(10)
+
+                # Prepare state
+                from datetime import datetime
+
+                filters = {}
+                if domain_filter:
+                    filters['domain'] = domain_filter
+                if complexity_filter != "All":
+                    filters['complexity'] = complexity_filter.lower()
+                filters['max_programs'] = max_programs
+
+                state = {
+                    "doc_type": doc_type,
+                    "format": doc_format,
+                    "filters": filters,
+                    "stage": "document_generation",
+                    "status": "pending",
+                    "errors": [],
+                    "file_path": None,
+                    "generation_time": 0.0,
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+
+                # Generate document
+                status_text.text(f"🤖 Generating documentation for {max_programs} programs...")
+                progress_bar.progress(30)
+
+                start_time = time.time()
+                result = document_generator_agent.process(state)
+                generation_time = time.time() - start_time
+
+                progress_bar.progress(100)
+                status_text.text("✅ Documentation complete!")
+
+                if result['status'] == 'completed':
+                    st.success(f"✅ Document generated successfully in {generation_time:.2f}s")
+
+                    # Show file path
+                    file_path = result['file_path']
+                    st.info(f"📁 File saved to: `{file_path}`")
+
+                    # Download button
+                    try:
+                        # Handle different file formats
+                        if file_path.endswith('.docx'):
+                            # For DOCX, read as binary
+                            with open(file_path, 'rb') as f:
+                                file_content = f.read()
+
+                            st.download_button(
+                                label="📥 Download Word Document",
+                                data=file_content,
+                                file_name=Path(file_path).name,
+                                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                                use_container_width=True
+                            )
+
+                            st.info("📄 DOCX file generated successfully. Click the button above to download.")
+
+                        else:
+                            # For Markdown, read as text
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                file_content = f.read()
+
+                            st.download_button(
+                                label="📥 Download Markdown",
+                                data=file_content,
+                                file_name=Path(file_path).name,
+                                mime="text/markdown",
+                                use_container_width=True
+                            )
+
+                            # Preview for markdown
+                            st.markdown("### Document Preview")
+                            with st.expander("View Content", expanded=True):
+                                st.markdown(file_content)
+
+                    except Exception as e:
+                        st.error(f"Error reading file: {e}")
+
+                else:
+                    st.error(f"❌ Document generation failed")
+                    if result.get('errors'):
+                        for error in result['errors']:
+                            st.error(f"• {error}")
+
+            except Exception as e:
+                st.error(f"Error generating document: {e}")
+
+    with col2:
+        st.markdown("### Document Types")
+
+        st.markdown("""
+        **System Overview**
+        - Executive summary
+        - Program statistics
+        - Domain breakdown
+        - Complexity analysis
+        - Top complex programs
+        - File operations summary
+        """)
+
+        st.markdown("### Coming Soon")
+        st.markdown("""
+        - Program Detail Reports
+        - Dependency Maps
+        - Modernization Recommendations
+        - Word/PDF Export
+        """)
+
+
 def main():
     """Main application"""
     init_session_state()
@@ -463,6 +697,8 @@ def main():
         show_query_graph()
     elif page == "📈 Analytics":
         show_analytics()
+    elif page == "📄 Documentation":
+        show_documentation()
 
 
 if __name__ == "__main__":

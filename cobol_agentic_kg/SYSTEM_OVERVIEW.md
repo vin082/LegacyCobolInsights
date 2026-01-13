@@ -6,7 +6,7 @@ A production-ready **multi-agent system** for analyzing COBOL codebases, buildin
 
 ## 📐 Architecture
 
-### **7 Specialized Agents**
+### **8 Specialized Agents**
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -29,12 +29,12 @@ A production-ready **multi-agent system** for analyzing COBOL codebases, buildin
                     │  LLM analysis    │
                     └──────────────────┘
                               │
-         ┌────────────────────┼────────────────────┐
-         ▼                    ▼                    ▼
-┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
-│  5. GRAPH        │  │  6. CYPHER       │  │  7. RETRIEVAL    │
-│  Neo4j builder   │  │  NL→Query gen    │  │  Execute & fetch │
-└──────────────────┘  └──────────────────┘  └──────────────────┘
+         ┌────────────────────┼────────────────────┬───────────────┐
+         ▼                    ▼                    ▼               ▼
+┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐  ┌──────────────────┐
+│  5. GRAPH        │  │  6. CYPHER       │  │  7. RETRIEVAL    │  │  8. DOCUMENT     │
+│  Neo4j builder   │  │  NL→Query gen    │  │  Execute & fetch │  │  Generator (NEW) │
+└──────────────────┘  └──────────────────┘  └──────────────────┘  └──────────────────┘
 ```
 
 ### **Technology Stack**
@@ -42,11 +42,12 @@ A production-ready **multi-agent system** for analyzing COBOL codebases, buildin
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
 | **Orchestration** | LangGraph | Agent workflow coordination |
-| **LLM** | OpenAI GPT-4o | Code understanding, query generation |
+| **LLM Providers** | OpenAI / Groq / Google Gemini | Multi-provider LLM support |
 | **Graph DB** | Neo4j 5.x | Knowledge graph storage |
 | **Frontend** | Streamlit | Interactive UI |
 | **Language** | Python 3.11+ | Core implementation |
 | **State Management** | TypedDict | Type-safe state passing |
+| **Document Export** | python-docx | DOCX generation |
 
 ## 📁 Project Structure
 
@@ -59,7 +60,8 @@ cobol_agentic_kg/
 │   ├── enrichment.py           # LLM-powered enrichment
 │   ├── graph_builder.py        # Neo4j graph construction
 │   ├── cypher_gen.py           # Natural language → Cypher
-│   └── retrieval.py            # Query execution
+│   ├── retrieval.py            # Query execution
+│   └── document_generator.py   # Technical documentation (NEW)
 │
 ├── workflows/                   # 🔄 Orchestration
 │   └── orchestrator.py         # LangGraph workflow manager
@@ -67,6 +69,7 @@ cobol_agentic_kg/
 ├── utils/                       # 🛠️ Shared utilities
 │   ├── state.py                # State definitions
 │   ├── neo4j_client.py         # Neo4j connection manager
+│   ├── llm_factory.py          # Multi-LLM provider support (NEW)
 │   └── logger.py               # Centralized logging
 │
 ├── config/                      # ⚙️ Configuration
@@ -342,15 +345,160 @@ python test_system.py
 | **Medium** | 10-50 files | Intermediate | https://github.com/OCamlPro/gnucobol-contrib |
 | **Large** | 100+ files | Advanced | https://github.com/openmainframeproject/cobol-programming-course |
 
+## 📄 Document Generator Agent (NEW)
+
+### **Purpose**
+Generates comprehensive technical documentation from the knowledge graph, creating professional business requirement documents for developers and business analysts.
+
+### **Key Features**
+
+1. **Multiple Document Types**
+   - System Overview - High-level architecture and statistics
+   - Program Details - Comprehensive technical specifications
+   - Dependency Maps - Call graphs and data flow
+   - Data Dictionary - File and variable catalog
+
+2. **LLM-Powered Analysis**
+   - Analyzes source code when enrichment data unavailable
+   - Generates intelligent insights about program purpose and business logic
+   - Explains dependencies and data operations in plain English
+   - Identifies complexity concerns and maintenance notes
+
+3. **Export Formats**
+   - **Markdown** - Version-control friendly, easy to read
+   - **DOCX** - Professional Word documents with formatting
+     - Proper heading hierarchy
+     - Formatted tables with bold headers
+     - Code blocks in Courier New
+     - Blockquotes for warnings
+
+4. **Performance Optimization**
+   - Configurable program limit (default: 10)
+   - Complexity filter (High/Medium/Low)
+   - Domain filter for business area focus
+   - Progress indicators during generation
+
+5. **Enrichment Status Handling**
+   - Detects when programs lack enrichment metadata
+   - Falls back to source code analysis
+   - Shows clear warnings about enrichment status
+   - Estimates LOC from source code
+
+### **Usage Example**
+
+```python
+from agents.document_generator import DocumentGeneratorAgent
+from utils.state import DocumentGenerationState
+
+state = DocumentGenerationState(
+    doc_type="program_detail",
+    format="docx",
+    filters={"max_programs": 10, "complexity": "high"},
+    stage="document_generation",
+    status="pending",
+    errors=[],
+    file_path=None,
+    generation_time=0.0,
+    timestamp=""
+)
+
+agent = DocumentGeneratorAgent()
+result = agent.process(state)
+
+print(f"Document saved to: {result['file_path']}")
+print(f"Generation time: {result['generation_time']:.2f}s")
+```
+
+### **Document Structure**
+
+Generated documents include:
+
+1. **Executive Summary**
+   - Total programs analyzed
+   - Technology overview
+   - System architecture summary
+   - Enrichment status
+
+2. **System Statistics**
+   - Programs, files, and relationships
+   - Complexity distribution
+   - Domain breakdown
+
+3. **Program Catalog**
+   - Name, domain, complexity, LOC
+   - Description and business logic
+   - Dependencies (calls in/out)
+   - Data file usage
+
+4. **Detailed Program Specifications** (for each program)
+   - Purpose and overview
+   - Business logic explanation
+   - Key functionality
+   - Data operations
+   - Dependencies with context
+   - Technical notes
+
+### **Performance Metrics**
+
+- **10 programs**: ~2-4 minutes (with LLM analysis)
+- **50 programs**: ~10-20 minutes (not recommended without filters)
+- **DOCX conversion**: < 5 seconds additional
+
+## 🔧 Multi-LLM Provider Support (NEW)
+
+### **Supported Providers**
+
+| Provider | Models | Best For | Cost | Speed |
+|----------|--------|----------|------|-------|
+| **OpenAI** | gpt-4o, gpt-4o-mini, gpt-5 | High-quality analysis, GPT-5 reasoning | $$$ | Medium |
+| **Groq** | llama-3.1-8b-instant, llama-3.3-70b-versatile, mixtral-8x7b-32768 | Fast inference, cost savings | FREE | Very Fast |
+| **Google** | gemini-2.0-flash-exp, gemini-2.5-flash, gemini-3-pro-preview | Balanced performance & affordability | $ | Fast |
+
+### **Provider Switching**
+
+```python
+from utils.llm_factory import set_llm_provider, get_llm
+
+# Switch provider programmatically
+set_llm_provider("google", model="gemini-2.5-flash")
+
+# Get LLM instance
+llm = get_llm(temperature=0.0, max_tokens=500)
+```
+
+### **Configuration**
+
+```env
+# Choose one provider
+LLM_PROVIDER=google
+
+# Configure all providers (only active one is used)
+OPENAI_API_KEY=sk-...
+OPENAI_MODEL=gpt-4o-mini
+
+GROQ_API_KEY=gsk_...
+GROQ_MODEL=llama-3.1-8b-instant
+
+GOOGLE_API_KEY=AIza...
+GEMINI_MODEL=gemini-2.5-flash
+```
+
+### **Special Handling**
+
+- **GPT-5 / O1 Models**: Automatically uses temperature=1 (required)
+- **Provider-Specific Caching**: Each provider has separate cache keys
+- **API Key Validation**: Environment variables set correctly per provider
+
 ## 🔮 Future Enhancements
 
 1. **Async Processing** - Use asyncio for faster batch processing
 2. **GraphRAG Integration** - Combine vector + graph retrieval
 3. **Visualization** - Interactive dependency graphs (D3.js)
-4. **Export** - Generate reports (PDF, HTML, GraphML)
-5. **CI/CD Integration** - GitHub Actions for automatic processing
-6. **Multi-tenancy** - Support multiple projects in one instance
-7. **Advanced Analytics** - Code quality metrics, trend analysis
+4. **Modernization Agent** - Risk scoring and migration recommendations
+5. **Translation Agent** - COBOL to Java/Python conversion
+6. **CI/CD Integration** - GitHub Actions for automatic processing
+7. **Multi-tenancy** - Support multiple projects in one instance
+8. **Advanced Analytics** - Code quality metrics, trend analysis
 
 ## 📞 Support
 

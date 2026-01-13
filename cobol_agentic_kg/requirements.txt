@@ -1,6 +1,8 @@
 # Core Dependencies (flexible versions for uv compatibility)
 langchain>=0.3.0,<0.4.0
 langchain-openai>=0.2.0,<0.3.0
+langchain-groq>=0.1.0  # For Groq LLM support
+langchain-google-genai>=2.0.0  # For Google Gemini support
 langchain-neo4j>=0.2.0,<0.3.0
 langchain-community>=0.3.0,<0.4.0
 langchain-experimental>=0.3.0,<0.4.0
@@ -37,6 +39,7 @@ prometheus-client>=0.21.0
 
 # File handling
 chardet>=5.0.0
+python-docx>=1.1.0  # For DOCX export
 
 # Caching
 redis>=5.0.0

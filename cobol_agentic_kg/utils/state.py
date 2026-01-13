@@ -90,6 +90,27 @@ class BatchProcessingState(TypedDict):
     warnings: Annotated[List[str], operator.add]
 
 
+class DocumentGenerationState(TypedDict):
+    """
+    State for document generation agent
+    """
+
+    # Document configuration
+    doc_type: str  # system_overview, program_detail, dependency_map, etc.
+    format: str  # markdown, word, pdf
+    filters: Dict[str, Any]  # Optional filters (domain, complexity, etc.)
+
+    # Processing status
+    stage: str  # document_generation
+    status: str  # pending, processing, completed, failed
+    errors: Annotated[List[str], operator.add]
+
+    # Output
+    file_path: Optional[str]  # Path to generated document
+    generation_time: float  # Time taken to generate document
+    timestamp: str  # ISO timestamp
+
+
 def create_initial_state(file_path: str, file_id: Optional[str] = None) -> CobolProcessingState:
     """
     Create initial state for a COBOL file
