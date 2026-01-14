@@ -6,10 +6,11 @@ Workflow Paths:
 2. Query Path: cypher_generator → retrieval
 3. Document Generation: Standalone (operates on KG)
 4. Modernization Analysis: Standalone (operates on KG)
+5. Code Translation: Standalone (operates on KG)
 
-Note: Document Generator and Modernization Agent are standalone agents that
-query the knowledge graph directly. They are invoked independently from the UI
-rather than as part of the file processing pipeline.
+Note: Document Generator, Modernization Agent, and Code Translation Agent are
+standalone agents that query the knowledge graph directly. They are invoked
+independently from the UI rather than as part of the file processing pipeline.
 """
 from langgraph.graph import StateGraph, END
 from utils.state import CobolProcessingState, create_initial_state
@@ -20,7 +21,7 @@ from agents.enrichment import enrichment_agent_node
 from agents.graph_builder import graph_builder_agent_node
 from agents.cypher_gen import cypher_generator_agent_node
 from agents.retrieval import retrieval_agent_node
-# Note: document_generator and modernization are standalone agents
+# Note: document_generator, modernization, and translation are standalone agents
 # They are imported and used directly in ui/app.py, not in the workflow
 from utils.logger import logger
 
@@ -43,9 +44,9 @@ class CobolWorkflowOrchestrator:
         - Graph Building: Create Neo4j nodes/relationships
         - Query: Optional natural language queries
 
-        Note: Document Generation and Modernization Analysis are NOT part of
-        this workflow. They are standalone agents that operate on the populated
-        knowledge graph and are invoked directly from the UI.
+        Note: Document Generation, Modernization Analysis, and Code Translation
+        are NOT part of this workflow. They are standalone agents that operate
+        on the populated knowledge graph and are invoked directly from the UI.
         """
 
         workflow = StateGraph(CobolProcessingState)

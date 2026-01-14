@@ -13,10 +13,11 @@
 
 ### Key Capabilities
 
-- **9 Specialized AI Agents** - Autonomous agents for ingestion, validation, parsing, enrichment, graph building, query generation, retrieval, documentation, and modernization
+- **10 Specialized AI Agents** - Autonomous agents for ingestion, validation, parsing, enrichment, graph building, query generation, retrieval, documentation, modernization, and code translation
 - **Multi-LLM Support** - Choose from OpenAI GPT-4/GPT-5, Groq (free & fast), or Google Gemini for cost-effective processing
 - **Automated Documentation** - Generate comprehensive technical specs and business requirement documents in Markdown or DOCX
 - **Modernization Recommendations** - AI-powered risk/value analysis with migration strategies and technology recommendations
+- **Code Translation** - Translate COBOL programs to Java, Python, or C# with test stubs and conversion documentation
 - **LLM-Powered Analysis** - Semantic understanding of COBOL code with intelligent insights
 - **Knowledge Graph** - Neo4j-based graph database for complex relationships
 - **Natural Language Queries** - Ask questions in plain English, get Cypher queries automatically
@@ -131,7 +132,7 @@ print(f"Program: {result['parsed_data']['program_name']}")
 
 ### 2. Monitor Processing
 
-Track progress through 9 stages:
+Track progress through 10 stages:
 1. Ingestion - File upload and validation
 2. Validation - COBOL syntax checking
 3. Parsing - Structure extraction
@@ -141,6 +142,7 @@ Track progress through 9 stages:
 7. Retrieval - Execute queries
 8. Documentation - Generate technical specs
 9. Modernization - Analyze and recommend migration strategies
+10. Translation - Convert COBOL to modern languages
 
 ### 3. Query the Knowledge Graph
 
@@ -198,6 +200,27 @@ ORDER BY p.complexity DESC
 - **Retire/Replace** - Low value, low risk programs
 - **Encapsulate & Modernize** - Low value, high risk programs (wrap with APIs)
 
+### 6. Translate COBOL to Modern Languages
+
+**Via UI:**
+- Select "Translation" from the sidebar
+- Select program(s) to translate
+- Choose target language (Java, Python, C#)
+- Choose framework (Spring Boot, FastAPI, .NET Core)
+- Configure options (test stubs, comments, package name)
+- Click "Translate Selected Programs"
+- Download translated code, test stubs, and conversion notes
+
+**Supported Translations:**
+- **Java**: Spring Boot (recommended) or Plain Java
+- **Python**: FastAPI (recommended), Flask, or Plain Python
+- **C#**: .NET Core (recommended) or Plain C#
+
+**Output for Each Program:**
+- Main code file with idiomatic modern code
+- Test stub with basic structure
+- README with conversion notes and manual review items
+
 ## Features in Detail
 
 ### Multi-Agent Architecture
@@ -213,6 +236,7 @@ ORDER BY p.complexity DESC
 | **Retrieval** | Execute queries, format results | Neo4j driver |
 | **Document Generator** | Create technical documentation | LLM, python-docx |
 | **Modernization Advisor** | Risk/value analysis, migration strategies | LLM, scoring algorithms |
+| **Code Translator** | COBOL to Java/Python/C# translation | LLM, context-aware generation |
 
 ### Multi-LLM Provider Support
 
@@ -314,7 +338,7 @@ CONNECTION_TIMEOUT = 30
 ```
 LegacyCobolInsights/
 └── cobol_agentic_kg/
-    ├── agents/              # 9 specialized agents
+    ├── agents/              # 10 specialized agents
     │   ├── ingestion.py
     │   ├── validation.py
     │   ├── parsing.py
@@ -323,7 +347,8 @@ LegacyCobolInsights/
     │   ├── cypher_gen.py
     │   ├── retrieval.py
     │   ├── document_generator.py
-    │   └── modernization.py  # NEW
+    │   ├── modernization.py
+    │   └── translation.py  # NEW
     ├── workflows/           # LangGraph orchestration
     │   └── orchestrator.py
     ├── utils/               # Shared utilities

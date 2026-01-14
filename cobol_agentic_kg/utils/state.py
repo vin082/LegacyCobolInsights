@@ -145,6 +145,46 @@ class ModernizationState(TypedDict):
     timestamp: str  # ISO timestamp
 
 
+class CodeTranslationState(TypedDict):
+    """
+    State for code translation agent
+    """
+
+    # Input configuration
+    program_names: List[str]  # Programs to translate (can be multiple)
+    target_language: str  # "java", "python", "csharp"
+    target_framework: str  # "spring-boot", "fastapi", "dotnet-core"
+
+    # Options
+    include_tests: bool  # Generate test stubs
+    include_comments: bool  # Preserve COBOL comments
+    package_name: Optional[str]  # Optional: com.example.cobol for Java
+
+    # Processing status
+    status: str  # pending, translating, completed, failed
+    errors: Annotated[List[str], operator.add]
+
+    # Output - list of translations
+    translations: List[Dict[str, Any]]  # Each translation contains:
+    # {
+    #   'program_name': str,
+    #   'target_language': str,
+    #   'main_file_path': str,
+    #   'test_file_path': Optional[str],
+    #   'readme_path': str,
+    #   'main_code': str,
+    #   'test_code': Optional[str],
+    #   'conversion_notes': List[str],
+    #   'manual_review_items': List[str],
+    #   'translation_success': bool,
+    #   'error_message': Optional[str]
+    # }
+
+    # Metrics
+    translation_time: float  # Time taken to translate all programs
+    timestamp: str  # ISO timestamp
+
+
 def create_initial_state(file_path: str, file_id: Optional[str] = None) -> CobolProcessingState:
     """
     Create initial state for a COBOL file

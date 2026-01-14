@@ -21,6 +21,7 @@ from utils.cache import get_cache
 from utils.llm_factory import get_available_models, set_llm_provider
 from agents.document_generator import document_generator_agent
 from agents.modernization import ModernizationAgent
+from agents.translation import code_translation_agent, LANGUAGE_CONFIG
 
 # Page configuration
 st.set_page_config(
@@ -72,7 +73,7 @@ def show_sidebar():
 
         page = st.radio(
             "Select Page",
-            ["📊 Dashboard", "📁 Upload Files", "🌐 Clone Repository", "🔍 Query Graph", "📈 Analytics", "📄 Documentation", "🔧 Modernization"],
+            ["📊 Dashboard", "📁 Upload Files", "🌐 Clone Repository", "🔍 Query Graph", "📈 Analytics", "📄 Documentation", "🔧 Modernization", "🔄 Translation"],
             label_visibility="collapsed"
         )
 
@@ -930,6 +931,278 @@ def show_modernization():
             )
 
 
+def show_translation():
+    """Show code translation page"""
+    st.markdown('<div class="main-header">🔄 Code Translation</div>', unsafe_allow_html=True)
+
+    st.markdown("""
+    Translate COBOL programs to modern languages using AI-powered translation with rich business context from the Knowledge Graph.
+
+    **Supported Languages**: Java (Spring Boot), Python (FastAPI), C# (.NET Core)
+    """)
+
+    # Get all programs from KG
+    try:
+        query = """
+        MATCH (p:CobolProgram)
+        RETURN p.name AS name,
+               COALESCE(p.domain, 'Unknown') AS domain,
+               COALESCE(p.complexity_score, 0) AS complexity,
+               COALESCE(p.loc, 0) AS loc
+        ORDER BY p.name
+        """
+        programs_data = neo4j_client.query(query)
+
+        if not programs_data:
+            st.warning("⚠️ No programs found in knowledge graph. Please upload and process COBOL files first.")
+            return
+
+        program_options = [f"{p['name']} ({p['domain']}, {int(p['loc'])} LOC)" for p in programs_data]
+        program_names = [p['name'] for p in programs_data]
+
+    except Exception as e:
+        st.error(f"Error loading programs: {e}")
+        return
+
+    # Program Selection
+    st.markdown("### 📋 Select Programs to Translate")
+
+    selected_indices = st.multiselect(
+        "Programs",
+        options=list(range(len(program_options))),
+        format_func=lambda i: program_options[i],
+        help="Select one or more programs to translate"
+    )
+
+    if not selected_indices:
+        st.info("👆 Select at least one program to begin translation")
+        return
+
+    selected_programs = [program_names[i] for i in selected_indices]
+
+    st.success(f"✅ Selected {len(selected_programs)} program(s): {', '.join(selected_programs)}")
+
+    # Translation Configuration
+    st.markdown("### ⚙️ Translation Configuration")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        target_language = st.selectbox(
+            "Target Language",
+            options=["java", "python", "csharp"],
+            format_func=lambda x: {"java": "☕ Java", "python": "🐍 Python", "csharp": "💎 C#"}[x],
+            help="Select the target programming language"
+        )
+
+    with col2:
+        # Get available frameworks for selected language
+        frameworks = LANGUAGE_CONFIG[target_language]['frameworks']
+        framework_display = {
+            'spring-boot': 'Spring Boot (Recommended)',
+            'fastapi': 'FastAPI (Recommended)',
+            'dotnet-core': '.NET Core (Recommended)',
+            'plain-java': 'Plain Java',
+            'plain-python': 'Plain Python',
+            'flask': 'Flask',
+            'plain-csharp': 'Plain C#'
+        }
+
+        target_framework = st.selectbox(
+            "Framework",
+            options=frameworks,
+            format_func=lambda x: framework_display.get(x, x),
+            help="Select the target framework"
+        )
+
+    # Advanced Options
+    with st.expander("🔧 Advanced Options", expanded=False):
+        include_tests = st.checkbox(
+            "Generate Test Stubs",
+            value=True,
+            help="Generate basic test structure with TODOs"
+        )
+
+        include_comments = st.checkbox(
+            "Preserve Comments & Add Documentation",
+            value=True,
+            help="Add detailed comments explaining COBOL origins"
+        )
+
+        package_name = st.text_input(
+            "Package/Namespace (Optional)",
+            placeholder="com.example.legacy" if target_language == "java" else "MyApp.Legacy" if target_language == "csharp" else "",
+            help="Optional package or namespace for the generated code"
+        )
+
+    # Translation Info
+    st.info(f"""
+💡 **Translation Details:**
+- {len(selected_programs)} program(s) will be translated to {target_language.upper()} using {target_framework}
+- Output will be saved to `exports/translations/{target_language}/{{program_name}}/`
+- Each program gets: Main code file, Test stub, README with conversion notes
+    """)
+
+    # Translate Button
+    if st.button("🚀 Translate Selected Programs", type="primary", use_container_width=True):
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        try:
+            from datetime import datetime as dt
+            from utils.state import CodeTranslationState
+
+            status_text.text("🔄 Initializing translation...")
+            progress_bar.progress(10)
+
+            # Create state
+            state = CodeTranslationState(
+                program_names=selected_programs,
+                target_language=target_language,
+                target_framework=target_framework,
+                include_tests=include_tests,
+                include_comments=include_comments,
+                package_name=package_name if package_name else None,
+                status='pending',
+                errors=[],
+                translations=[],
+                translation_time=0.0,
+                timestamp=dt.now().isoformat()
+            )
+
+            status_text.text(f"🤖 Translating {len(selected_programs)} program(s) with LLM...")
+            progress_bar.progress(30)
+
+            # Run translation
+            result = code_translation_agent.process(state)
+
+            progress_bar.progress(100)
+            status_text.text("✅ Translation complete!")
+
+            if result['status'] == 'completed':
+                translations = result['translations']
+                success_count = sum(1 for t in translations if t['translation_success'])
+
+                st.success(f"✅ Successfully translated {success_count}/{len(translations)} program(s) in {result['translation_time']:.2f} seconds")
+
+                # Display results
+                st.markdown("---")
+                st.markdown("### 📦 Translation Results")
+
+                for translation in translations:
+                    if not translation['translation_success']:
+                        with st.expander(f"❌ {translation['program_name']} - Translation Failed", expanded=False):
+                            st.error(f"Error: {translation.get('error_message', 'Unknown error')}")
+                        continue
+
+                    with st.expander(f"✅ {translation['program_name']} - Translation Successful", expanded=True):
+                        # Show file paths
+                        st.markdown("**Generated Files:**")
+                        st.code(f"""
+Main Code: {translation['main_file_path']}
+Test Stub: {translation.get('test_file_path', 'N/A')}
+README:    {translation['readme_path']}
+                        """)
+
+                        # Conversion Notes
+                        if translation['conversion_notes']:
+                            st.markdown("**🔄 Conversion Notes:**")
+                            for note in translation['conversion_notes']:
+                                st.markdown(f"- {note}")
+
+                        # Manual Review Items
+                        if translation['manual_review_items']:
+                            st.markdown("**⚠️ Manual Review Required:**")
+                            for item in translation['manual_review_items']:
+                                st.warning(item)
+
+                        # Code Preview Tabs
+                        tab1, tab2, tab3 = st.tabs(["📄 Main Code", "🧪 Test Stub", "📖 README"])
+
+                        with tab1:
+                            st.code(translation['main_code'], language=target_language)
+                            st.download_button(
+                                "📥 Download Main Code",
+                                translation['main_code'],
+                                file_name=Path(translation['main_file_path']).name,
+                                mime="text/plain"
+                            )
+
+                        with tab2:
+                            if translation.get('test_code'):
+                                st.code(translation['test_code'], language=target_language)
+                                st.download_button(
+                                    "📥 Download Test Code",
+                                    translation['test_code'],
+                                    file_name=Path(translation['test_file_path']).name,
+                                    mime="text/plain"
+                                )
+                            else:
+                                st.info("Test stub generation was disabled")
+
+                        with tab3:
+                            # Read README from file
+                            try:
+                                with open(translation['readme_path'], 'r', encoding='utf-8') as f:
+                                    readme_content = f.read()
+                                st.markdown(readme_content)
+                                st.download_button(
+                                    "📥 Download README",
+                                    readme_content,
+                                    file_name="README.md",
+                                    mime="text/markdown"
+                                )
+                            except Exception as e:
+                                st.error(f"Could not load README: {e}")
+
+                # Provide zip download for all files
+                st.markdown("---")
+                st.markdown("### 📦 Download All Translations")
+
+                import zipfile
+                import io
+
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+                    for translation in translations:
+                        if translation['translation_success']:
+                            # Add main code
+                            zip_file.write(
+                                translation['main_file_path'],
+                                arcname=f"{translation['program_name']}/{Path(translation['main_file_path']).name}"
+                            )
+                            # Add test if exists
+                            if translation.get('test_file_path'):
+                                zip_file.write(
+                                    translation['test_file_path'],
+                                    arcname=f"{translation['program_name']}/{Path(translation['test_file_path']).name}"
+                                )
+                            # Add README
+                            zip_file.write(
+                                translation['readme_path'],
+                                arcname=f"{translation['program_name']}/README.md"
+                            )
+
+                zip_buffer.seek(0)
+                st.download_button(
+                    label="📦 Download All as ZIP",
+                    data=zip_buffer,
+                    file_name=f"cobol_translations_{target_language}_{dt.now().strftime('%Y%m%d_%H%M%S')}.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
+
+            else:
+                st.error(f"Translation failed: {', '.join(result['errors'])}")
+
+        except Exception as e:
+            st.error(f"❌ Error during translation: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
+            progress_bar.empty()
+            status_text.empty()
+
+
 def main():
     """Main application"""
     init_session_state()
@@ -949,6 +1222,8 @@ def main():
         show_documentation()
     elif page == "🔧 Modernization":
         show_modernization()
+    elif page == "🔄 Translation":
+        show_translation()
 
 
 if __name__ == "__main__":
