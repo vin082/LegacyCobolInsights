@@ -14,6 +14,15 @@ import shutil
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+# Force reload agent modules to pick up code changes
+import importlib
+if 'agents.parsing' in sys.modules:
+    importlib.reload(sys.modules['agents.parsing'])
+if 'agents.validation' in sys.modules:
+    importlib.reload(sys.modules['agents.validation'])
+if 'agents.ingestion' in sys.modules:
+    importlib.reload(sys.modules['agents.ingestion'])
+
 from workflows.orchestrator import orchestrator
 from utils.neo4j_client import neo4j_client
 from config.settings import settings
@@ -22,6 +31,8 @@ from utils.llm_factory import get_available_models, set_llm_provider
 from agents.document_generator import document_generator_agent
 from agents.modernization import ModernizationAgent
 from agents.translation import code_translation_agent, LANGUAGE_CONFIG
+from agents.tech_debt_analyzer import tech_debt_analyzer
+from agents.tech_debt_visualizer import tech_debt_visualizer
 
 # Page configuration
 st.set_page_config(
@@ -73,7 +84,7 @@ def show_sidebar():
 
         page = st.radio(
             "Select Page",
-            ["📊 Dashboard", "📁 Upload Files", "🌐 Clone Repository", "🔍 Query Graph", "📈 Analytics", "📄 Documentation", "🔧 Modernization", "🔄 Translation"],
+            ["📊 Dashboard", "📁 Upload Files", "🌐 Clone Repository", "🔍 Query Graph", "📈 Analytics", "📄 Documentation", "🔧 Modernization", "🔄 Translation", "⚠️ Tech Debt"],
             label_visibility="collapsed"
         )
 
@@ -220,11 +231,20 @@ def show_dashboard():
 
 def show_upload_files():
     """Show file upload interface"""
-    st.markdown('<div class="main-header">📁 Upload COBOL Files</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">📁 Upload Mainframe Files</div>', unsafe_allow_html=True)
+
+    st.markdown("""
+    Upload mainframe artifact files for processing:
+    - **COBOL programs** (`.cob`, `.cbl`, `.cobol`)
+    - **Copybooks** (`.cpy`)
+    - **JCL files** (`.jcl`)
+    - **BMS screen maps** (`.bms`)
+    - **CSD system definitions** (`.csd`)
+    """)
 
     uploaded_files = st.file_uploader(
-        "Upload COBOL files (.cob, .cbl, .cobol)",
-        type=['cob', 'cbl', 'cobol'],
+        "Upload mainframe files",
+        type=['cob', 'cbl', 'cobol', 'cpy', 'jcl', 'bms', 'csd'],
         accept_multiple_files=True
     )
 
@@ -241,8 +261,11 @@ def show_upload_files():
         for i, uploaded_file in enumerate(uploaded_files, 1):
             status_text.text(f"Processing {i}/{total}: {uploaded_file.name}")
 
-            # Save temporary file
-            with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.cob') as tmp:
+            # Get file extension to determine file type
+            file_ext = Path(uploaded_file.name).suffix.lower()
+
+            # Save temporary file with correct extension
+            with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix=file_ext) as tmp:
                 tmp.write(uploaded_file.getvalue())
                 tmp_path = tmp.name
 
@@ -254,7 +277,19 @@ def show_upload_files():
                 # Display result
                 with results_container:
                     if result['status'] == 'completed':
-                        st.success(f"✅ {uploaded_file.name} - {result['parsed_data'].get('program_name', 'N/A')}")
+                        # Display appropriate identifier based on file type
+                        if file_ext in ['.cob', '.cbl', '.cobol']:
+                            identifier = result.get('parsed_data', {}).get('program_name', 'N/A')
+                        elif file_ext == '.cpy':
+                            identifier = f"Copybook ({result.get('copybook_data', {}).get('copybook_name', 'N/A')})"
+                        elif file_ext == '.jcl':
+                            identifier = f"Job ({result.get('jcl_data', {}).get('job_name', 'N/A')})"
+                        elif file_ext in ['.bms', '.csd']:
+                            identifier = f"CICS ({result.get('cics_data', {}).get('type', 'N/A')})"
+                        else:
+                            identifier = 'N/A'
+
+                        st.success(f"✅ {uploaded_file.name} - {identifier}")
                     else:
                         st.error(f"❌ {uploaded_file.name} - {result.get('errors', ['Unknown error'])}")
 
@@ -277,14 +312,19 @@ def show_upload_files():
 
 def show_clone_repository():
     """Show repository cloning interface"""
-    st.markdown('<div class="main-header">🌐 Clone COBOL Repository</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">🌐 Clone Mainframe Repository</div>', unsafe_allow_html=True)
 
     st.markdown("""
-    Clone a Git repository containing COBOL files and process all `.cob`, `.cbl`, and `.cobol` files.
+    Clone a Git repository containing mainframe artifacts and process all supported file types:
+    - **COBOL programs** (`.cob`, `.cbl`, `.cobol`)
+    - **Copybooks** (`.cpy`)
+    - **JCL files** (`.jcl`)
+    - **BMS screen maps** (`.bms`)
+    - **CSD system definitions** (`.csd`)
 
     **Sample Repositories:**
+    - https://github.com/aws-samples/aws-mainframe-modernization-carddemo (44 COBOL, 62 copybooks, 55 JCL)
     - https://github.com/openmainframeproject/cobol-programming-course
-    - https://github.com/OCamlPro/gnucobol-contrib
     """)
 
     repo_url = st.text_input("Repository URL", placeholder="https://github.com/user/repo")
@@ -305,18 +345,38 @@ def show_clone_repository():
                 Repo.clone_from(repo_url, temp_dir)
                 st.success(f"✅ Repository cloned to {temp_dir}")
 
-                # Find COBOL files
-                cobol_files = []
-                for ext in ['*.cob', '*.cbl', '*.cobol', '*.COB', '*.CBL', '*.COBOL']:
-                    cobol_files.extend(Path(temp_dir).rglob(ext))
+                # Find all supported mainframe artifact files
+                mainframe_files = []
 
-                cobol_files = [str(f) for f in cobol_files[:max_files]]
+                # Define all supported extensions (lowercase and uppercase)
+                supported_extensions = [
+                    '*.cob', '*.cbl', '*.cobol',  # COBOL programs
+                    '*.cpy',                       # Copybooks
+                    '*.jcl',                       # JCL
+                    '*.bms',                       # BMS screen maps
+                    '*.csd',                       # CSD system definitions
+                    '*.COB', '*.CBL', '*.COBOL',  # Uppercase variants
+                    '*.CPY', '*.JCL', '*.BMS', '*.CSD'
+                ]
 
-                if not cobol_files:
-                    st.warning("No COBOL files found in repository")
+                for ext in supported_extensions:
+                    mainframe_files.extend(Path(temp_dir).rglob(ext))
+
+                mainframe_files = [str(f) for f in mainframe_files[:max_files]]
+
+                if not mainframe_files:
+                    st.warning("No mainframe files found in repository")
                     return
 
-                st.info(f"Found {len(cobol_files)} COBOL files")
+                # Count files by type for display
+                file_counts = {}
+                for file_path in mainframe_files:
+                    ext = Path(file_path).suffix.lower()
+                    file_counts[ext] = file_counts.get(ext, 0) + 1
+
+                # Display file type breakdown
+                count_str = ", ".join([f"{count} {ext}" for ext, count in sorted(file_counts.items())])
+                st.info(f"Found {len(mainframe_files)} files: {count_str}")
 
                 # Process files
                 progress_bar = st.progress(0)
@@ -325,8 +385,10 @@ def show_clone_repository():
 
                 results = []
 
-                for i, file_path in enumerate(cobol_files, 1):
-                    status_text.text(f"Processing {i}/{len(cobol_files)}: {Path(file_path).name}")
+                for i, file_path in enumerate(mainframe_files, 1):
+                    file_name = Path(file_path).name
+                    file_ext = Path(file_path).suffix.lower()
+                    status_text.text(f"Processing {i}/{len(mainframe_files)}: {file_name}")
 
                     try:
                         result = orchestrator.process_file(file_path)
@@ -334,20 +396,31 @@ def show_clone_repository():
 
                         with results_container:
                             if result['status'] == 'completed':
-                                program_name = result['parsed_data'].get('program_name', 'N/A')
-                                st.success(f"✅ {Path(file_path).name} - {program_name}")
+                                # Display appropriate identifier based on file type
+                                if file_ext in ['.cob', '.cbl', '.cobol']:
+                                    identifier = result.get('parsed_data', {}).get('program_name', 'N/A')
+                                elif file_ext == '.cpy':
+                                    identifier = f"Copybook ({result.get('copybook_data', {}).get('copybook_name', 'N/A')})"
+                                elif file_ext == '.jcl':
+                                    identifier = f"Job ({result.get('jcl_data', {}).get('job_name', 'N/A')})"
+                                elif file_ext in ['.bms', '.csd']:
+                                    identifier = f"CICS ({result.get('cics_data', {}).get('type', 'N/A')})"
+                                else:
+                                    identifier = file_ext
+
+                                st.success(f"✅ {file_name} - {identifier}")
                             else:
-                                st.error(f"❌ {Path(file_path).name}")
+                                st.error(f"❌ {file_name}")
 
                     except Exception as e:
-                        st.error(f"❌ {Path(file_path).name} - {str(e)}")
+                        st.error(f"❌ {file_name} - {str(e)}")
 
-                    progress_bar.progress(i / len(cobol_files))
+                    progress_bar.progress(i / len(mainframe_files))
 
                 # Store results
                 st.session_state.processing_results.extend(results)
 
-                status_text.text(f"✅ Completed! Processed {len(cobol_files)} files")
+                status_text.text(f"✅ Completed! Processed {len(mainframe_files)} files")
 
                 # Show summary
                 st.markdown("### Processing Summary")
@@ -1203,6 +1276,195 @@ README:    {translation['readme_path']}
             status_text.empty()
 
 
+def show_tech_debt():
+    """Technical Debt Analysis Page"""
+    st.markdown('<div class="main-header">⚠️ Technical Debt Analysis</div>', unsafe_allow_html=True)
+    st.markdown("Analyze and visualize technical debt across your COBOL codebase")
+
+    st.markdown("---")
+
+    # Filters section
+    st.markdown("### 🎛️ Analysis Filters")
+    col1, col2 = st.columns(2)
+
+    with col1:
+        domain_filter = st.text_input(
+            "Domain Filter (optional)",
+            placeholder="e.g., billing, customer, payment",
+            help="Filter programs by business domain"
+        )
+
+    with col2:
+        max_programs = st.slider(
+            "Max Programs to Analyze",
+            min_value=10,
+            max_value=100,
+            value=50,
+            step=10,
+            help="Limit number of programs for faster analysis"
+        )
+
+    # Run analysis button
+    if st.button("🔍 Analyze Technical Debt", type="primary", use_container_width=True):
+        with st.spinner("Analyzing technical debt..."):
+            # Prepare filters
+            filters = {
+                'max_programs': max_programs
+            }
+            if domain_filter:
+                filters['domain'] = domain_filter
+
+            # Create state
+            from utils.state import TypedDict, Annotated, operator
+            state = {
+                'filters': filters,
+                'status': 'pending',
+                'errors': [],
+                'debt_metrics': {},
+                'program_debts': [],
+                'analysis_time': 0.0,
+                'timestamp': ''
+            }
+
+            # Run analysis
+            result = tech_debt_analyzer.process(state)
+
+            if result['status'] == 'completed':
+                st.session_state['tech_debt_result'] = result
+                st.success(f"✅ Analysis complete! Analyzed {len(result['program_debts'])} programs in {result['analysis_time']:.2f}s")
+            else:
+                st.error(f"❌ Analysis failed: {', '.join(result.get('errors', []))}")
+
+    # Display results if available
+    if 'tech_debt_result' in st.session_state:
+        result = st.session_state['tech_debt_result']
+        debt_metrics = result['debt_metrics']
+        program_debts = result['program_debts']
+
+        st.markdown("---")
+        st.markdown("### 📊 Summary Metrics")
+
+        # Display metric cards
+        metric_cards = tech_debt_visualizer.create_summary_metrics_cards(debt_metrics)
+
+        cols = st.columns(len(metric_cards))
+        for i, card in enumerate(metric_cards):
+            with cols[i]:
+                color = card.get('color', 'blue')
+                st.metric(
+                    label=f"{card['icon']} {card['title']}",
+                    value=card['value']
+                )
+
+        st.markdown("---")
+
+        # Visualizations
+        st.markdown("### 📈 Visualizations")
+
+        # Row 1: Severity distribution and top programs
+        col1, col2 = st.columns([1, 2])
+
+        with col1:
+            st.markdown("#### Severity Distribution")
+            fig = tech_debt_visualizer.create_severity_distribution_chart(debt_metrics)
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col2:
+            st.markdown("#### Top Programs by Debt Score")
+            fig = tech_debt_visualizer.create_top_debt_programs_chart(program_debts, top_n=15)
+            st.plotly_chart(fig, use_container_width=True)
+
+        # Row 2: Component breakdown and heatmap
+        st.markdown("#### Debt Component Breakdown")
+        fig = tech_debt_visualizer.create_debt_components_chart(program_debts, top_n=10)
+        st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("#### Technical Debt Heatmap")
+        fig = tech_debt_visualizer.create_debt_heatmap(program_debts, max_programs=30)
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Row 3: Scatter plots
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("#### Size vs Complexity Analysis")
+            fig = tech_debt_visualizer.create_scatter_size_vs_complexity(program_debts)
+            st.plotly_chart(fig, use_container_width=True)
+
+        with col2:
+            st.markdown("#### Coupling Analysis")
+            fig = tech_debt_visualizer.create_coupling_analysis_chart(program_debts, top_n=15)
+            st.plotly_chart(fig, use_container_width=True)
+
+        st.markdown("---")
+
+        # Detailed program list
+        st.markdown("### 📋 Detailed Program Analysis")
+
+        # Severity filter
+        severity_filter = st.multiselect(
+            "Filter by Severity",
+            options=['Critical', 'High', 'Medium', 'Low'],
+            default=['Critical', 'High']
+        )
+
+        filtered_programs = [
+            p for p in program_debts
+            if p['severity'] in severity_filter
+        ] if severity_filter else program_debts
+
+        if filtered_programs:
+            # Convert to DataFrame for display
+            df = pd.DataFrame([
+                {
+                    'Program': p['program_name'],
+                    'Domain': p['domain'],
+                    'Total Debt': f"{p['total_debt_score']:.1f}",
+                    'Severity': p['severity'],
+                    'Complexity': f"{p['complexity_debt']:.1f}",
+                    'Coupling': f"{p['coupling_debt']:.1f}",
+                    'Size': f"{p['size_debt']:.1f}",
+                    'Documentation': f"{p['documentation_debt']:.1f}",
+                    'Code Quality': f"{p['code_quality_debt']:.1f}",
+                    'LOC': p['loc'],
+                    'Dependencies (In/Out)': f"{p['calls_in']}/{p['calls_out']}"
+                }
+                for p in filtered_programs
+            ])
+
+            st.dataframe(
+                df,
+                use_container_width=True,
+                height=400,
+                hide_index=True
+            )
+
+            # Expandable recommendations
+            st.markdown("#### 💡 Recommendations for High-Debt Programs")
+
+            for prog in filtered_programs[:10]:  # Show top 10
+                if prog['severity'] in ['Critical', 'High']:
+                    with st.expander(f"📦 {prog['program_name']} - {prog['severity']} ({prog['total_debt_score']:.1f})"):
+                        st.markdown(f"**Domain:** {prog['domain']}")
+                        st.markdown(f"**Top Issues:** {', '.join(prog['top_issues'])}")
+                        st.markdown("**Recommendations:**")
+                        for rec in prog['recommendations']:
+                            st.markdown(f"- {rec}")
+
+            # Export option
+            st.markdown("---")
+            if st.button("📥 Export to CSV"):
+                csv = df.to_csv(index=False)
+                st.download_button(
+                    label="Download CSV",
+                    data=csv,
+                    file_name=f"tech_debt_analysis_{result['timestamp'][:10]}.csv",
+                    mime="text/csv"
+                )
+        else:
+            st.info("No programs match the selected severity filters")
+
+
 def main():
     """Main application"""
     init_session_state()
@@ -1224,6 +1486,8 @@ def main():
         show_modernization()
     elif page == "🔄 Translation":
         show_translation()
+    elif page == "⚠️ Tech Debt":
+        show_tech_debt()
 
 
 if __name__ == "__main__":

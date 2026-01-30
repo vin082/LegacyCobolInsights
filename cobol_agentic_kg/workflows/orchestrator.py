@@ -17,6 +17,9 @@ from utils.state import CobolProcessingState, create_initial_state
 from agents.ingestion import ingestion_agent_node
 from agents.validation import validation_agent_node
 from agents.parsing import parsing_agent_node
+from agents.copybook_parser import copybook_parser_node
+from agents.jcl_parser import jcl_parser_node
+from agents.cics_parser import cics_parser_node
 from agents.enrichment import enrichment_agent_node
 from agents.graph_builder import graph_builder_agent_node
 from agents.cypher_gen import cypher_generator_agent_node
@@ -54,7 +57,13 @@ class CobolWorkflowOrchestrator:
         # Add agent nodes for file processing pipeline
         workflow.add_node("ingestion", ingestion_agent_node)
         workflow.add_node("validation", validation_agent_node)
-        workflow.add_node("parsing", parsing_agent_node)
+
+        # Parser nodes - one for each file type
+        workflow.add_node("cobol_parser", parsing_agent_node)
+        workflow.add_node("copybook_parser", copybook_parser_node)
+        workflow.add_node("jcl_parser", jcl_parser_node)
+        workflow.add_node("cics_parser", cics_parser_node)
+
         workflow.add_node("enrichment", enrichment_agent_node)
         workflow.add_node("graph_builder", graph_builder_agent_node)
         workflow.add_node("cypher_generator", cypher_generator_agent_node)
@@ -64,17 +73,35 @@ class CobolWorkflowOrchestrator:
         workflow.set_entry_point("ingestion")
         workflow.add_edge("ingestion", "validation")
 
-        # Conditional: continue only if validation passes
+        # Conditional: route to appropriate parser based on file type
+        # After validation, we know the file_type, so route accordingly
         workflow.add_conditional_edges(
             "validation",
-            self._should_continue_after_validation,
+            self._route_to_parser,
             {
-                "continue": "parsing",
+                "cobol_parser": "cobol_parser",
+                "copybook_parser": "copybook_parser",
+                "jcl_parser": "jcl_parser",
+                "cics_parser": "cics_parser",
                 "end": END
             }
         )
 
-        workflow.add_edge("parsing", "enrichment")
+        # All parsers route to enrichment
+        # Note: Only COBOL programs get enriched (LLM analysis)
+        # Other file types skip enrichment and go straight to graph builder
+        workflow.add_conditional_edges(
+            "cobol_parser",
+            self._route_after_parsing,
+            {
+                "enrichment": "enrichment",
+                "graph_builder": "graph_builder"
+            }
+        )
+        workflow.add_edge("copybook_parser", "graph_builder")
+        workflow.add_edge("jcl_parser", "graph_builder")
+        workflow.add_edge("cics_parser", "graph_builder")
+
         workflow.add_edge("enrichment", "graph_builder")
 
         # Conditional: query path or end
@@ -92,12 +119,55 @@ class CobolWorkflowOrchestrator:
 
         return workflow.compile()
 
-    def _should_continue_after_validation(self, state: CobolProcessingState) -> str:
-        """Decide whether to continue or stop based on validation"""
+    def _route_to_parser(self, state: CobolProcessingState) -> str:
+        """
+        Route to appropriate parser based on file type
+
+        File types are determined by validation agent based on extension:
+        - .cbl, .CBL -> COBOL program
+        - .cpy, .CPY -> Copybook
+        - .jcl, .JCL -> JCL
+        - .bms, .BMS -> BMS (CICS screen)
+        - .csd, .CSD -> CSD (CICS system definition)
+        """
         if not state.get('is_valid', False):
             logger.warning(f"Validation failed for {state['file_path']}")
             return 'end'
-        return 'continue'
+
+        file_type = state.get('file_type', 'UNKNOWN').upper()
+        file_ext = state['file_metadata'].get('extension', '').lower()
+
+        # Route based on file extension
+        if file_ext in ['.cbl', '.cob']:
+            logger.info(f"Routing to COBOL parser")
+            return 'cobol_parser'
+
+        elif file_ext in ['.cpy']:
+            logger.info(f"Routing to Copybook parser")
+            return 'copybook_parser'
+
+        elif file_ext in ['.jcl']:
+            logger.info(f"Routing to JCL parser")
+            return 'jcl_parser'
+
+        elif file_ext in ['.bms', '.csd']:
+            logger.info(f"Routing to CICS parser ({file_ext})")
+            return 'cics_parser'
+
+        else:
+            logger.warning(f"Unknown file type: {file_ext}, skipping")
+            return 'end'
+
+    def _route_after_parsing(self, state: CobolProcessingState) -> str:
+        """
+        After COBOL parsing, decide whether to enrich
+
+        Only COBOL programs get enriched (LLM analysis for business logic).
+        If enrichment is disabled or fails, go directly to graph builder.
+        """
+        # For now, always enrich COBOL programs
+        # In future, could make this conditional based on config
+        return 'enrichment'
 
     def _route_after_graph_build(self, state: CobolProcessingState) -> str:
         """After graph building, decide next step"""

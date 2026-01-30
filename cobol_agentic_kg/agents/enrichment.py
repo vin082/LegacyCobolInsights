@@ -1,12 +1,13 @@
 """
-Enrichment Agent - Adds semantic understanding using LLM
+Enrichment Agent - Adds semantic understanding using LLM and generates embeddings
 """
 import json
 from typing import Dict, Any
-from langchain_openai import ChatOpenAI
 from utils.state import CobolProcessingState
 from utils.logger import logger
+from utils.llm_factory import get_llm
 from config.settings import settings
+from langchain_openai import OpenAIEmbeddings
 
 
 class EnrichmentAgent:
@@ -14,17 +15,42 @@ class EnrichmentAgent:
 
     def __init__(self):
         self._llm = None
+        self._llm_provider = None
+        self._llm_model = None
+        self._embeddings = None  # Lazy-loaded OpenAI embeddings
 
     @property
     def llm(self):
-        """Lazy initialization of LLM (only when needed)"""
-        if self._llm is None:
-            self._llm = ChatOpenAI(
-                model=settings.llm_model,
+        """Lazy initialization of LLM with provider change detection"""
+        current_provider = settings.llm_provider
+        current_model = settings.get_llm_model()
+
+        # Reinitialize LLM if provider or model changed
+        if (self._llm is None or
+            self._llm_provider != current_provider or
+            self._llm_model != current_model):
+
+            logger.info(f"🔄 Enrichment: Initializing {current_provider}/{current_model}")
+            self._llm = get_llm(
                 temperature=settings.llm_temperature,
                 max_tokens=settings.llm_max_tokens
             )
+            self._llm_provider = current_provider
+            self._llm_model = current_model
+
         return self._llm
+
+    @property
+    def embeddings(self):
+        """Lazy initialization of embeddings"""
+        if self._embeddings is None:
+            try:
+                self._embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+                logger.info("🔄 Initialized OpenAI embeddings (text-embedding-3-small)")
+            except Exception as e:
+                logger.warning(f"Failed to initialize embeddings: {e}")
+                self._embeddings = None
+        return self._embeddings
 
     def process(self, state: CobolProcessingState) -> CobolProcessingState:
         """
@@ -55,6 +81,11 @@ class EnrichmentAgent:
 
             # Generate enrichment
             enriched_data = self._generate_enrichment(context, state)
+
+            # Generate embedding for semantic search
+            embedding = self._generate_embedding(state, enriched_data)
+            if embedding:
+                enriched_data['embedding'] = embedding
 
             # Update state
             return {
@@ -186,6 +217,52 @@ Return ONLY valid JSON, no markdown or explanation:
             functions.append(f"Calls subprograms: {', '.join(parsed['calls'][:2])}")
 
         return functions[:3]
+
+    def _generate_embedding(self, state: CobolProcessingState, enriched_data: Dict[str, Any]) -> list:
+        """
+        Generate vector embedding for semantic search
+
+        Creates a rich text representation combining program metadata and enrichment,
+        then generates an embedding vector for similarity search.
+
+        Args:
+            state: Processing state with parsed data
+            enriched_data: Enrichment results from LLM
+
+        Returns:
+            List of floats (embedding vector) or None if embeddings unavailable
+        """
+        if self.embeddings is None:
+            logger.debug("Embeddings not available, skipping embedding generation")
+            return None
+
+        try:
+            parsed = state['parsed_data']
+            program_name = parsed.get('program_name', 'UNKNOWN')
+
+            # Create rich text for embedding
+            # Combine multiple aspects to create comprehensive semantic representation
+            embedding_text = f"""
+            Program: {program_name}
+            Summary: {enriched_data.get('summary', '')}
+            Business Domain: {enriched_data.get('business_domain', '')}
+            Complexity: {enriched_data.get('complexity_rating', '')}
+            Key Functions: {', '.join(enriched_data.get('key_functions', []))}
+            Technical Debt: {', '.join(enriched_data.get('technical_debt_indicators', []))}
+            Procedures: {', '.join(parsed.get('procedures', [])[:5])}
+            Files: {', '.join(parsed.get('files_read', []) + parsed.get('files_written', []))}
+            Calls: {', '.join(parsed.get('calls', []))}
+            """.strip()
+
+            # Generate embedding
+            embedding = self.embeddings.embed_query(embedding_text)
+
+            logger.debug(f"Generated embedding for {program_name} (dimension: {len(embedding)})")
+            return embedding
+
+        except Exception as e:
+            logger.warning(f"Failed to generate embedding: {e}")
+            return None
 
 
 # Create singleton instance

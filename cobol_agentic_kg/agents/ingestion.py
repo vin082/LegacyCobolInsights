@@ -12,7 +12,14 @@ class IngestionAgent:
     """Agent responsible for ingesting COBOL files"""
 
     def __init__(self):
-        self.supported_extensions = ['.cob', '.cbl', '.cobol', '.cpy']
+        # Supported file extensions for mainframe artifacts
+        self.supported_extensions = [
+            '.cob', '.cbl', '.cobol',  # COBOL programs
+            '.cpy',                     # Copybooks
+            '.jcl',                     # JCL (Job Control Language)
+            '.bms',                     # BMS (CICS screen maps)
+            '.csd',                     # CSD (CICS system definitions)
+        ]
 
     def process(self, state: CobolProcessingState) -> CobolProcessingState:
         """

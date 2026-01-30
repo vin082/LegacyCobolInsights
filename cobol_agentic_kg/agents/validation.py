@@ -1,5 +1,12 @@
 """
-Validation Agent - Validates COBOL file structure and syntax
+Validation Agent - Validates mainframe artifact structure and syntax
+
+Supports:
+- COBOL programs (.cbl, .cob, .cobol)
+- Copybooks (.cpy)
+- JCL files (.jcl)
+- BMS screen maps (.bms)
+- CSD system definitions (.csd)
 """
 import re
 from typing import List, Tuple
@@ -61,27 +68,37 @@ class ValidationAgent:
 
     def _detect_file_type(self, content: str) -> str:
         """
-        Detect COBOL file type
+        Detect mainframe file type
 
         Args:
             content: File content
 
         Returns:
-            File type (COBOL_PROGRAM, COPYBOOK, JCL, UNKNOWN)
+            File type (COBOL_PROGRAM, COPYBOOK, JCL, BMS, CSD, UNKNOWN)
         """
         content_upper = content.upper()
+
+        # Check for JCL indicators first (most distinctive)
+        # JCL starts with // in columns 1-2
+        if content.startswith('//') or (content.lstrip().startswith('//') and ' JOB ' in content_upper[:200]):
+            return "JCL"
+
+        # Check for BMS (CICS screen maps)
+        if 'DFHMSD' in content_upper or 'DFHMDI' in content_upper:
+            return "BMS"
+
+        # Check for CSD (CICS system definitions)
+        if 'DEFINE TRANSACTION' in content_upper or 'DEFINE PROGRAM' in content_upper:
+            return "CSD"
 
         # Check for PROGRAM-ID (COBOL program)
         if 'PROGRAM-ID' in content_upper:
             return "COBOL_PROGRAM"
 
-        # Check for COPY statement (copybook)
-        if re.search(r'\bCOPY\b', content_upper):
+        # Check for COPY statement or 01-level (copybook)
+        # Copybooks typically have data structures but no PROGRAM-ID
+        if re.search(r'\bCOPY\b', content_upper) or (re.search(r'^\s*01\s+\w+', content, re.MULTILINE) and 'PROGRAM-ID' not in content_upper):
             return "COPYBOOK"
-
-        # Check for JCL indicators
-        if content.startswith('//') or 'JOB' in content_upper[:100]:
-            return "JCL"
 
         # Check if it has COBOL divisions
         if any(div in content_upper for div in self.required_divisions):
@@ -91,7 +108,7 @@ class ValidationAgent:
 
     def _validate_structure(self, content: str, file_type: str) -> Tuple[bool, List[str]]:
         """
-        Validate COBOL structure
+        Validate mainframe file structure
 
         Args:
             content: File content
@@ -117,12 +134,26 @@ class ValidationAgent:
                 errors.append("Invalid COBOL syntax detected")
 
         elif file_type == "COPYBOOK":
-            # Copybooks have lighter requirements
+            # Copybooks have lighter requirements - just check for data definitions
             if not re.search(r'\d{2}\s+\w+', content):
                 errors.append("Copybook appears to have invalid structure")
 
         elif file_type == "JCL":
-            errors.append("JCL files are not supported (COBOL files only)")
+            # JCL validation - check for job card
+            if not re.search(r'^//\w+\s+JOB\s+', content, re.MULTILINE):
+                errors.append("JCL file missing JOB card")
+
+        elif file_type == "BMS":
+            # BMS validation - check for mapset definition
+            content_upper = content.upper()
+            if 'DFHMSD' not in content_upper:
+                errors.append("BMS file missing DFHMSD (mapset definition)")
+
+        elif file_type == "CSD":
+            # CSD validation - check for DEFINE statements
+            content_upper = content.upper()
+            if not re.search(r'DEFINE\s+(TRANSACTION|PROGRAM)', content_upper):
+                errors.append("CSD file missing DEFINE statements")
 
         elif file_type == "UNKNOWN":
             errors.append("Could not determine file type")

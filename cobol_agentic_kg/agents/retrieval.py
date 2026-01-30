@@ -2,10 +2,10 @@
 Retrieval Agent - Executes queries and retrieves results
 """
 from typing import List, Dict, Any
-from langchain_openai import ChatOpenAI
 from utils.state import CobolProcessingState
 from utils.neo4j_client import neo4j_client
 from utils.logger import logger
+from utils.llm_factory import get_llm
 from config.settings import settings
 from utils.cache import get_cache
 import hashlib
@@ -18,6 +18,8 @@ class RetrievalAgent:
         self.client = neo4j_client
         self._llm = None
         self._cache = None
+        self._llm_provider = None
+        self._llm_model = None
 
     @property
     def cache(self):
@@ -28,23 +30,20 @@ class RetrievalAgent:
 
     @property
     def llm(self):
-        """Lazy initialization of LLM for answer generation"""
-        if self._llm is None:
-            from config.settings import settings
-            import os
+        """Lazy initialization of LLM for answer generation with provider change detection"""
+        current_provider = settings.llm_provider
+        current_model = settings.get_llm_model()
 
-            # Ensure API key is set
-            api_key = settings.openai_api_key or os.environ.get("OPENAI_API_KEY")
-            if not api_key:
-                raise ValueError("OpenAI API key is not configured. Please set OPENAI_API_KEY in .env file")
+        # Reinitialize LLM if provider or model changed
+        if (self._llm is None or
+            self._llm_provider != current_provider or
+            self._llm_model != current_model):
 
-            self._llm = ChatOpenAI(
-                model="gpt-4o-mini",
-                temperature=0,
-                api_key=api_key,
-                timeout=30,
-                max_retries=2
-            )
+            logger.info(f"🔄 Initializing LLM: {current_provider}/{current_model}")
+            self._llm = get_llm(temperature=0)
+            self._llm_provider = current_provider
+            self._llm_model = current_model
+
         return self._llm
 
     def process(self, state: CobolProcessingState) -> CobolProcessingState:
@@ -121,18 +120,26 @@ class RetrievalAgent:
 
     def _generate_cache_key(self, cypher: str) -> str:
         """
-        Generate cache key from Cypher query
+        Generate cache key from Cypher query + LLM provider/model
 
         Args:
             cypher: Cypher query string
 
         Returns:
-            Cache key
+            Cache key including provider and model info
         """
         # Normalize query (remove extra whitespace, convert to lowercase)
-        normalized = ' '.join(cypher.lower().split())
-        hash_value = hashlib.md5(normalized.encode()).hexdigest()
-        return f"query:{hash_value}"
+        normalized_query = ' '.join(cypher.lower().split())
+
+        # Include LLM provider and model in cache key
+        # This ensures different models generate fresh responses
+        llm_identifier = f"{settings.llm_provider}:{settings.get_llm_model()}"
+
+        # Combine query and LLM info
+        cache_string = f"{normalized_query}|{llm_identifier}"
+        hash_value = hashlib.md5(cache_string.encode()).hexdigest()
+
+        return f"query:{settings.llm_provider}:{hash_value}"
 
     def _format_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """

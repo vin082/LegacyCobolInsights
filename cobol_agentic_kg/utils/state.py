@@ -33,10 +33,13 @@ class CobolProcessingState(TypedDict):
     # ========================================================================
     # Validation agent output
     is_valid: bool
-    file_type: str  # COBOL_PROGRAM, COPYBOOK, JCL, etc.
+    file_type: str  # COBOL_PROGRAM, COPYBOOK, JCL, BMS, CSD, etc.
 
-    # Parsing agent output
-    parsed_data: Dict[str, Any]  # Extracted entities
+    # Parsing agent outputs (one of these will be populated based on file_type)
+    parsed_data: Dict[str, Any]  # COBOL program extracted entities
+    copybook_data: Dict[str, Any]  # Copybook data structures
+    jcl_data: Dict[str, Any]  # JCL job definitions
+    cics_data: Dict[str, Any]  # CICS transaction/screen definitions
 
     # Enrichment agent output
     enriched_data: Dict[str, Any]  # LLM-generated insights
@@ -210,6 +213,9 @@ def create_initial_state(file_path: str, file_id: Optional[str] = None) -> Cobol
         is_valid=False,
         file_type="UNKNOWN",
         parsed_data={},
+        copybook_data={},
+        jcl_data={},
+        cics_data={},
         enriched_data={},
         graph_data={},
         user_query=None,
