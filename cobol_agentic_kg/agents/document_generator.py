@@ -101,6 +101,8 @@ class DocumentGeneratorAgent:
             data['data_flows'] = self._get_program_data_flows(program_name)
             data['procedures'] = self._get_program_procedures(program_name)
             data['business_logic'] = self._extract_program_business_logic(program_name)
+            data['copybooks'] = self._get_program_copybooks(program_name)
+            data['jobs'] = self._get_program_jobs(program_name)
 
         data['generation_date'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         data['filters'] = filters
@@ -110,10 +112,14 @@ class DocumentGeneratorAgent:
     def _get_all_programs_for_documentation(self, filters: Dict) -> List[Dict]:
         """Get all programs with comprehensive details for documentation"""
 
-        # Build WHERE clause based on filters
+        # Build WHERE clause based on filters; domain uses a parameter to avoid injection
         where_clauses = []
+        params: Dict[str, Any] = {}
+
         if filters.get('domain'):
-            where_clauses.append(f"p.domain = '{filters['domain']}'")
+            where_clauses.append("p.domain = $domain")
+            params['domain'] = filters['domain']
+
         if filters.get('complexity'):
             if filters['complexity'] == 'low':
                 where_clauses.append("p.complexity_score < 30")
@@ -124,8 +130,9 @@ class DocumentGeneratorAgent:
 
         where_clause = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
 
-        # Get limit from filters (default 10 for performance)
-        limit = filters.get('max_programs', 10)
+        # Get limit from filters (default 10 for performance); coerce to int
+        limit = int(filters.get('max_programs', 10))
+        params['limit'] = limit
 
         query = f"""
         MATCH (p:CobolProgram)
@@ -156,11 +163,11 @@ class DocumentGeneratorAgent:
                files_read,
                files_written
         ORDER BY COALESCE(p.complexity_score, calls_in + calls_out) DESC
-        LIMIT {limit}
+        LIMIT $limit
         """
 
         try:
-            results = self.neo4j.query(query)
+            results = self.neo4j.query(query, params)
             logger.info(f"Retrieved {len(results)} programs for documentation")
             return results
         except Exception as e:
@@ -168,28 +175,31 @@ class DocumentGeneratorAgent:
             return []
 
     def _get_program_details(self, program_name: str) -> Dict[str, Any]:
-        """Get detailed information for a specific program"""
-        query = f"""
-        MATCH (p:CobolProgram {{name: '{program_name}'}})
+        """Get detailed information for a specific program, including source code"""
+        query = """
+        MATCH (p:CobolProgram {name: $program_name})
         RETURN p.name AS name,
                p.domain AS domain,
                p.description AS description,
                p.complexity_score AS complexity_score,
                p.loc AS loc,
-               p.file_path AS file_path
+               p.file_path AS file_path,
+               p.code AS source_code
         """
         try:
-            result = self.neo4j.query(query)
+            result = self.neo4j.query(query, {'program_name': program_name})
             return result[0] if result else {}
-        except:
+        except Exception as e:
+            logger.error(f"Error fetching details for {program_name}: {e}")
             return {}
 
     def _get_program_dependencies(self, program_name: str) -> Dict[str, Any]:
         """Get program dependencies (calls and called by)"""
+        params = {'program_name': program_name}
 
         # Programs this program calls
-        calls_query = f"""
-        MATCH (p:CobolProgram {{name: '{program_name}'}})-[:CALLS]->(called:CobolProgram)
+        calls_query = """
+        MATCH (p:CobolProgram {name: $program_name})-[:CALLS]->(called:CobolProgram)
         RETURN called.name AS program,
                called.domain AS domain,
                called.complexity_score AS complexity
@@ -197,8 +207,8 @@ class DocumentGeneratorAgent:
         """
 
         # Programs that call this program
-        called_by_query = f"""
-        MATCH (caller:CobolProgram)-[:CALLS]->(p:CobolProgram {{name: '{program_name}'}})
+        called_by_query = """
+        MATCH (caller:CobolProgram)-[:CALLS]->(p:CobolProgram {name: $program_name})
         RETURN caller.name AS program,
                caller.domain AS domain,
                caller.complexity_score AS complexity
@@ -206,19 +216,20 @@ class DocumentGeneratorAgent:
         """
 
         try:
-            calls = self.neo4j.query(calls_query)
-            called_by = self.neo4j.query(called_by_query)
+            calls = self.neo4j.query(calls_query, params)
+            called_by = self.neo4j.query(called_by_query, params)
             return {
                 'calls': calls,
                 'called_by': called_by
             }
-        except:
+        except Exception as e:
+            logger.error(f"Error fetching dependencies for {program_name}: {e}")
             return {'calls': [], 'called_by': []}
 
     def _get_program_data_flows(self, program_name: str) -> Dict[str, Any]:
         """Get data file operations for a program"""
-        query = f"""
-        MATCH (p:CobolProgram {{name: '{program_name}'}})-[r]->(f:DataFile)
+        query = """
+        MATCH (p:CobolProgram {name: $program_name})-[r]->(f:DataFile)
         WHERE type(r) IN ['READS', 'WRITES']
         RETURN f.name AS file_name,
                type(r) AS operation,
@@ -227,7 +238,7 @@ class DocumentGeneratorAgent:
         """
 
         try:
-            results = self.neo4j.query(query)
+            results = self.neo4j.query(query, {'program_name': program_name})
 
             # Organize by file
             files = {}
@@ -241,13 +252,14 @@ class DocumentGeneratorAgent:
                 files[file_name]['operations'].append(row['operation'])
 
             return files
-        except:
+        except Exception as e:
+            logger.error(f"Error fetching data flows for {program_name}: {e}")
             return {}
 
     def _get_program_procedures(self, program_name: str) -> List[Dict]:
         """Get procedures/paragraphs within a program"""
-        query = f"""
-        MATCH (p:CobolProgram {{name: '{program_name}'}})-[:CONTAINS]->(proc:Procedure)
+        query = """
+        MATCH (p:CobolProgram {name: $program_name})-[:CONTAINS]->(proc:Procedure)
         RETURN proc.name AS name,
                proc.type AS type,
                proc.description AS description
@@ -256,25 +268,54 @@ class DocumentGeneratorAgent:
         """
 
         try:
-            return self.neo4j.query(query)
-        except:
+            return self.neo4j.query(query, {'program_name': program_name})
+        except Exception as e:
+            logger.error(f"Error fetching procedures for {program_name}: {e}")
             return []
 
     def _extract_program_business_logic(self, program_name: str) -> str:
         """Extract business logic description from enrichment data"""
-        query = f"""
-        MATCH (p:CobolProgram {{name: '{program_name}'}})
+        query = """
+        MATCH (p:CobolProgram {name: $program_name})
         RETURN p.business_logic AS business_logic,
                p.description AS description
         """
 
         try:
-            result = self.neo4j.query(query)
+            result = self.neo4j.query(query, {'program_name': program_name})
             if result:
                 return result[0].get('business_logic') or result[0].get('description') or ''
             return ''
-        except:
+        except Exception as e:
+            logger.error(f"Error fetching business logic for {program_name}: {e}")
             return ''
+
+    def _get_program_copybooks(self, program_name: str) -> List[Dict]:
+        """Get copybooks included by a program"""
+        query = """
+        MATCH (p:CobolProgram {name: $program_name})-[:INCLUDES]->(c:Copybook)
+        RETURN c.name AS name
+        ORDER BY c.name
+        """
+        try:
+            return self.neo4j.query(query, {'program_name': program_name})
+        except Exception as e:
+            logger.error(f"Error fetching copybooks for {program_name}: {e}")
+            return []
+
+    def _get_program_jobs(self, program_name: str) -> List[Dict]:
+        """Get JCL jobs that execute a program"""
+        query = """
+        MATCH (j:Job)-[:EXECUTES]->(p:CobolProgram {name: $program_name})
+        RETURN j.name AS name,
+               j.description AS description
+        ORDER BY j.name
+        """
+        try:
+            return self.neo4j.query(query, {'program_name': program_name})
+        except Exception as e:
+            logger.error(f"Error fetching jobs for {program_name}: {e}")
+            return []
 
     def _generate_technical_documentation(self, doc_type: str, data: Dict) -> str:
         """Generate technical documentation using LLM"""
@@ -375,7 +416,10 @@ Quick reference table of all documented programs:
 
         # Generate detailed docs for each program
         for idx, prog in enumerate(programs, 1):
-            md += self._generate_single_program_doc(prog, idx)
+            prog_name = prog.get('program_name', '')
+            copybooks = self._get_program_copybooks(prog_name) if prog_name else []
+            jobs = self._get_program_jobs(prog_name) if prog_name else []
+            md += self._generate_single_program_doc(prog, idx, copybooks=copybooks, jobs=jobs)
             md += "\n---\n\n"
 
         md += f"""
@@ -387,7 +431,39 @@ Quick reference table of all documented programs:
 
         return md
 
-    def _generate_single_program_doc(self, prog_summary: Dict, index: int) -> str:
+    @staticmethod
+    def _extract_paragraphs_from_source(source_code: str) -> List[Dict]:
+        """
+        Fallback: extract paragraph names from source code when the graph has no
+        Procedure nodes.  Strategy: collect all PERFORM targets — these are the
+        authoritative set of paragraph/section names actually invoked in the program.
+        Filters out COBOL keywords that can follow PERFORM (e.g. UNTIL).
+        """
+        if not source_code:
+            return []
+
+        # Words that can legally follow PERFORM but are not paragraph names
+        COBOL_KEYWORDS = {
+            'UNTIL', 'VARYING', 'THRU', 'THROUGH', 'INLINE',
+            'WITH', 'TEST', 'AFTER', 'BEFORE',
+        }
+
+        seen = set()
+        paragraphs = []
+        # Match PERFORM <name> — name is alphanumeric + hyphens
+        for match in re.finditer(r'\bPERFORM\s+([\w-]+)', source_code, re.IGNORECASE):
+            name = match.group(1).strip()
+            upper = name.upper()
+            if upper in COBOL_KEYWORDS or upper in seen:
+                continue
+            seen.add(upper)
+            paragraphs.append({'name': name, 'type': 'Paragraph', 'description': None})
+
+        return paragraphs
+
+    def _generate_single_program_doc(self, prog_summary: Dict, index: int,
+                                     copybooks: List[Dict] = None,
+                                     jobs: List[Dict] = None) -> str:
         """Generate detailed documentation for a single program using LLM"""
 
         program_name = prog_summary.get('program_name', 'Unknown')
@@ -399,9 +475,14 @@ Quick reference table of all documented programs:
         procedures = self._get_program_procedures(program_name)
         business_logic = self._extract_program_business_logic(program_name)
 
-        # Get source code for analysis if available
-        source_code = prog_summary.get('source_code', '')
-        code_snippet = source_code[:2000] if source_code else ''  # First 2000 chars
+        # Source code: prefer prog_details (program_detail path), fall back to prog_summary (system_overview path)
+        source_code = prog_details.get('source_code') or prog_summary.get('source_code') or ''
+        code_snippet = source_code[:2000] if source_code else ''
+
+        # If graph returned no procedures but we have source, extract paragraph names as fallback
+        if not procedures and source_code:
+            procedures = self._extract_paragraphs_from_source(source_code)
+            logger.info(f"📝 Extracted {len(procedures)} paragraphs from source for {program_name}")
 
         # Check if enrichment has run
         is_enriched = prog_summary.get('domain') not in ['Not Enriched', None]
@@ -417,9 +498,10 @@ LINES OF CODE: {prog_summary.get('loc', 0)}"""
         else:
             context = f"""PROGRAM: {program_name}
 DESCRIPTION: {prog_details.get('description', 'No description available')}
+COMPLEXITY: {prog_summary.get('complexity', 0)}
 LINES OF CODE: {prog_summary.get('loc', 0)}
 
-⚠️ NOTE: This program has not been enriched yet. Analyze the source code below to infer:
+NOTE: This program has not been enriched yet. Analyze the source code below to infer:
 - Business domain
 - Complexity level
 - Business logic
@@ -428,6 +510,55 @@ SOURCE CODE SNIPPET (first 2000 characters):
 ```cobol
 {code_snippet}
 ```"""
+
+        # --- Rich data-file context for the LLM prompt ---
+        data_files_context = ""
+        if data_flows:
+            data_files_context = "DATA FILES (from knowledge graph):\n"
+            for fname, finfo in list(data_flows.items())[:10]:
+                ops = ", ".join(set(finfo['operations']))
+                desc = finfo.get('description') or 'No description'
+                data_files_context += f"  - {fname}: operations=[{ops}], description={desc}\n"
+        # If source is available, also note files referenced in source that may not be in the graph
+        if source_code:
+            source_upper = source_code.upper()
+            select_files = re.findall(r'SELECT\s+([\w-]+)\s+ASSIGN', source_upper)
+            graph_files_upper = {f.upper() for f in data_flows.keys()} if data_flows else set()
+            extra_files = [f for f in select_files if f not in graph_files_upper]
+            if extra_files:
+                data_files_context += "\nAdditional files referenced in source (not tracked as graph edges):\n"
+                for f in extra_files:
+                    data_files_context += f"  - {f}\n"
+
+        # --- Copybooks context ---
+        copybooks_context = ""
+        if copybooks:
+            copybooks_context = f"COPYBOOKS INCLUDED ({len(copybooks)}):\n"
+            copybooks_context += "  " + ", ".join(c['name'] for c in copybooks) + "\n"
+
+        # --- JCL jobs context ---
+        jobs_context = ""
+        if jobs:
+            jobs_context = f"JCL JOBS THAT EXECUTE THIS PROGRAM ({len(jobs)}):\n"
+            for j in jobs:
+                jobs_context += f"  - {j['name']}: {j.get('description') or 'No description'}\n"
+        else:
+            jobs_context = "JCL JOBS: None found in knowledge graph.\n"
+
+        # --- Procedures context ---
+        procedures_context = f"PROCEDURES / PARAGRAPHS ({len(procedures)}):\n"
+        if procedures:
+            procedures_context += "  " + ", ".join(p['name'] for p in procedures[:30]) + "\n"
+            if len(procedures) > 30:
+                procedures_context += f"  ...and {len(procedures) - 30} more\n"
+        else:
+            procedures_context += "  None found.\n"
+
+        # --- Complexity flag for prompt ---
+        complexity = prog_summary.get('complexity') or 0
+        complexity_instruction = ""
+        if complexity >= 70:
+            complexity_instruction = f"\nIMPORTANT: This program has a HIGH complexity score of {complexity}. Flag this prominently in the Technical Notes section — explain likely complexity drivers and recommend refactoring or test coverage.\n"
 
         # Use LLM to generate comprehensive documentation
         prompt = f"""You are a technical writer creating detailed COBOL program documentation for developers and business analysts.
@@ -442,12 +573,11 @@ CALLS OUT TO ({len(dependencies.get('calls', []))} programs):
 CALLED BY ({len(dependencies.get('called_by', []))} programs):
 {[p['program'] for p in dependencies.get('called_by', [])[:10]]}
 
-DATA FILES ({len(data_flows)} files):
-{list(data_flows.keys())[:10]}
-
-PROCEDURES ({len(procedures)} procedures):
-{[p['name'] for p in procedures[:20]]}
-
+{data_files_context}
+{procedures_context}
+{copybooks_context}
+{jobs_context}
+{complexity_instruction}
 Generate documentation with these sections:
 
 ### 3.{index} {program_name}
@@ -462,19 +592,27 @@ Generate documentation with these sections:
 [Bullet points of main functions/capabilities]
 
 #### Data Operations
-[Describe the data files it reads/writes and why]
+[Describe ALL data files it reads/writes and why — include both graph-tracked and source-referenced files. Use a table with columns: File, Organization/Access, Role]
 
 #### Dependencies
-[Explain the programs it depends on and which programs depend on it]
+[Explain programs it depends on and which depend on it. Note copybooks. Note any external runtime calls like CEE3ABD if present in source. Note JCL job linkage.]
 
 #### Technical Notes
-[Any complexity concerns, performance considerations, or maintenance notes]
+[Complexity concerns, performance considerations, maintenance notes. If complexity is high, flag prominently with specific drivers.]
 
 Format as markdown. Be technical but clear. Focus on helping developers understand how to work with this program."""
 
         try:
             response = self.llm.invoke(prompt)
-            return response.content.strip()
+            llm_output = response.content.strip()
+
+            # Append complexity warning block after LLM output if high complexity
+            if complexity >= 70:
+                llm_output += f"""
+
+> **HIGH COMPLEXITY WARNING**: This program has a complexity score of {complexity}/100. Prioritize it for refactoring or comprehensive test coverage before any modifications."""
+
+            return llm_output
         except Exception as e:
             logger.error(f"LLM documentation generation failed for {program_name}: {e}")
 
@@ -565,20 +703,89 @@ Format as markdown. Be technical but clear. Focus on helping developers understa
         return md
 
     def _generate_program_documentation(self, data: Dict) -> str:
-        """Generate documentation for a single program (detailed mode)"""
+        """Generate documentation for a single program (detailed mode) with full skeleton"""
 
         prog_info = data.get('program_info', {})
         program_name = prog_info.get('name', 'Unknown')
+        copybooks = data.get('copybooks', [])
+        jobs = data.get('jobs', [])
+        data_flows = data.get('data_flows', {})
+        dependencies = data.get('dependencies', {})
+        source_code = prog_info.get('source_code') or ''
 
-        # Create comprehensive single-program documentation
+        # Determine enrichment status
+        is_enriched = prog_info.get('domain') not in ['Not Enriched', None]
+        complexity = prog_info.get('complexity_score') or 0
+
+        # Count source-referenced files via SELECT...ASSIGN
+        source_file_count = len(re.findall(r'SELECT\s+[\w-]+\s+ASSIGN', source_code.upper())) if source_code else 0
+
         prog_summary = {
             'program_name': program_name,
             'domain': prog_info.get('domain'),
-            'complexity': prog_info.get('complexity_score'),
-            'loc': prog_info.get('loc')
+            'complexity': complexity,
+            'loc': prog_info.get('loc'),
+            'source_code': source_code
         }
 
-        return self._generate_single_program_doc(prog_summary, 1)
+        # --- Summary table ---
+        enrichment_label = "Yes" if is_enriched else "No"
+        enrichment_warning = ""
+        if not is_enriched:
+            enrichment_warning = f"""
+> **Enrichment Note:** The knowledge graph does not contain enriched metadata (business_logic, description) for this program. The documentation below was generated by analyzing the COBOL source code directly.
+"""
+
+        complexity_label = f"{complexity} (HIGH)" if complexity >= 70 else f"{complexity} ({'MEDIUM' if complexity >= 30 else 'LOW'})"
+
+        md = f"""# COBOL Program Technical Documentation — {program_name}
+
+**Document Type:** Program Detail Specification
+**Generated:** {data['generation_date']}
+**Program:** {program_name}
+**Domain:** {prog_info.get('domain') or 'Not Enriched'}
+**Enrichment Status:** {'Enriched' if is_enriched else 'Not Enriched — documentation inferred from source code + knowledge graph'}
+
+---
+
+## Program Summary
+
+| Property | Value |
+|----------|-------|
+| Program Name | {program_name} |
+| Domain | {prog_info.get('domain') or 'Not Enriched'} |
+| Complexity Score | {complexity_label} |
+| Lines of Code | {prog_info.get('loc') or 0} |
+| Source Code Available | {'Yes' if source_code else 'No'} |
+| Enriched | {enrichment_label} |
+| Outbound Calls | {len(dependencies.get('calls', []))} |
+| Inbound Calls | {len(dependencies.get('called_by', []))} |
+| Data Files (graph) | {len(data_flows)} |
+| Data Files (source) | {source_file_count} |
+| Copybooks | {len(copybooks)} |
+| JCL Jobs | {len(jobs)} |
+
+{enrichment_warning}
+---
+
+"""
+
+        # --- LLM-generated body ---
+        md += self._generate_single_program_doc(prog_summary, 1, copybooks=copybooks, jobs=jobs)
+
+        # --- Footer ---
+        md += f"""
+
+---
+
+**END OF DOCUMENT**
+
+*Generated by COBOL Agentic Knowledge Graph*
+*Source: Neo4j Knowledge Graph + COBOL source code analysis*
+*Generated: {data['generation_date']}*
+"""
+
+        return md
 
     def _export_file(self, doc_type: str, doc_format: str, content: str, program_name: str = None) -> Path:
         """Export document to file"""
