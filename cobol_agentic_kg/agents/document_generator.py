@@ -24,6 +24,162 @@ class DocumentGeneratorAgent:
         self.templates_dir = Path(__file__).parent.parent / "templates"
         self.exports_dir.mkdir(exist_ok=True)
         self.llm = None
+        self._embeddings = None
+        self._vector_index_available = None  # tri-state: None = unchecked
+
+    # ── Embedding / vector-search plumbing (mirrors cypher_gen pattern) ──
+
+    @property
+    def embeddings(self):
+        """Lazy-init OpenAI embeddings. Returns None if unavailable."""
+        if self._embeddings is None:
+            try:
+                from langchain_openai import OpenAIEmbeddings
+                self._embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+                logger.debug("DocumentGenerator: initialised embeddings")
+            except Exception as e:
+                logger.warning(f"DocumentGenerator: embeddings init failed: {e}")
+                self._embeddings = None
+        return self._embeddings
+
+    def _check_vector_index_available(self) -> bool:
+        """Check once whether the cobol_program_embeddings index exists."""
+        if self._vector_index_available is not None:
+            return self._vector_index_available
+        try:
+            result = self.neo4j.query("SHOW INDEXES WHERE name = 'cobol_program_embeddings'")
+            self._vector_index_available = len(result) > 0
+            logger.debug(f"DocumentGenerator: vector index available = {self._vector_index_available}")
+            return self._vector_index_available
+        except Exception:
+            self._vector_index_available = False
+            return False
+
+    def _semantic_search(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+        """
+        Vector similarity search against cobol_program_embeddings.
+        Returns list of {name, domain, summary, business_logic, score}.
+        Silently returns [] if embeddings or index are unavailable.
+        """
+        if not self.embeddings or not self._check_vector_index_available():
+            return []
+        try:
+            query_embedding = self.embeddings.embed_query(query)
+            return self.neo4j.query("""
+                CALL db.index.vector.queryNodes('cobol_program_embeddings', $k, $embedding)
+                YIELD node, score
+                WHERE score > 0.65
+                RETURN node.name            AS name,
+                       COALESCE(node.domain, 'Unknown') AS domain,
+                       node.summary         AS summary,
+                       node.business_logic  AS business_logic,
+                       score
+                ORDER BY score DESC
+            """, {'k': k, 'embedding': query_embedding})
+        except Exception as e:
+            logger.warning(f"DocumentGenerator: semantic search failed: {e}")
+            return []
+
+    def _semantic_enrich(self, themes: List[str], k: int = 5) -> str:
+        """
+        Run a vector search for each theme string and return a single
+        formatted context block ready to paste into an LLM prompt.
+
+        If the vector index is unavailable the returned string is empty —
+        callers should fall back to the non-vector context they already have.
+        """
+        if not self.embeddings or not self._check_vector_index_available():
+            return ""
+
+        blocks: List[str] = []
+        for theme in themes:
+            hits = self._semantic_search(theme, k=k)
+            if not hits:
+                continue
+            lines = [f"  - {h['name']} [{h['domain']}] (similarity {h['score']:.2f}): "
+                     f"{h.get('summary') or h.get('business_logic') or 'no summary'}"
+                     for h in hits]
+            blocks.append(f"Theme \"{theme}\":\n" + "\n".join(lines))
+
+        if not blocks:
+            return ""
+        return "SEMANTICALLY RELEVANT PROGRAMS (vector search):\n" + "\n\n".join(blocks)
+
+    def _get_related_programs(self, program_name: str, domain: str = None,
+                              summary: str = None, business_logic: str = None,
+                              k: int = 5) -> str:
+        """
+        Find programs semantically related to *program_name*.
+
+        Strategy:
+          1. If the vector index is available AND we have a rich text
+             (summary / business_logic), do a vector similarity search
+             using that text as the query.  Exclude the program itself.
+          2. If vector search returns nothing (program not enriched, or
+             index missing), fall back to a lightweight Cypher query that
+             finds programs sharing the same domain or copybooks.
+
+        Returns a formatted context string ready to drop into a prompt,
+        or empty string if nothing was found.
+        """
+        vector_hits: List[Dict] = []
+
+        # ── attempt 1: vector search ──
+        query_text = (summary or "") + " " + (business_logic or "")
+        if query_text.strip() and self.embeddings and self._check_vector_index_available():
+            try:
+                query_embedding = self.embeddings.embed_query(query_text.strip())
+                vector_hits = self.neo4j.query("""
+                    CALL db.index.vector.queryNodes('cobol_program_embeddings', $k, $embedding)
+                    YIELD node, score
+                    WHERE score > 0.6 AND node.name <> $exclude
+                    RETURN node.name            AS name,
+                           COALESCE(node.domain, 'Unknown') AS domain,
+                           node.summary         AS summary,
+                           node.business_logic  AS business_logic,
+                           score
+                    ORDER BY score DESC
+                """, {'k': k + 1, 'embedding': query_embedding, 'exclude': program_name})
+            except Exception as e:
+                logger.warning(f"Vector search for related programs failed: {e}")
+
+        if vector_hits:
+            lines = [f"  - {h['name']} [{h['domain']}] (similarity {h['score']:.2f}): "
+                     f"{h.get('summary') or h.get('business_logic') or 'no summary'}"
+                     for h in vector_hits[:k]]
+            return "RELATED PROGRAMS (vector similarity):\n" + "\n".join(lines)
+
+        # ── attempt 2: graph fallback — same domain or shared copybooks ──
+        try:
+            fallback = self.neo4j.query("""
+                MATCH (target:CobolProgram {name: $name})
+                OPTIONAL MATCH (target)-[:INCLUDES]->(cb:Copybook)<-[:INCLUDES]-(sibling:CobolProgram)
+                  WHERE sibling.name <> $name
+                WITH target, collect(DISTINCT sibling.name) AS copybook_siblings
+                OPTIONAL MATCH (domain_sibling:CobolProgram)
+                  WHERE domain_sibling.domain = target.domain
+                    AND domain_sibling.name <> $name
+                WITH target, copybook_siblings,
+                     collect(DISTINCT domain_sibling.name) AS domain_siblings
+                RETURN copybook_siblings, domain_siblings,
+                       target.domain AS domain
+            """, {'name': program_name})
+
+            if fallback:
+                row = fallback[0]
+                cb_siblings  = row.get('copybook_siblings') or []
+                dom_siblings = row.get('domain_siblings') or []
+                lines: List[str] = []
+                if cb_siblings:
+                    lines.append(f"  Shared copybooks: {', '.join(cb_siblings[:6])}")
+                if dom_siblings:
+                    lines.append(f"  Same domain ({row.get('domain', 'Unknown')}): {', '.join(dom_siblings[:6])}")
+                if lines:
+                    return "RELATED PROGRAMS (graph — shared copybooks / domain):\n" + "\n".join(lines)
+        except Exception as e:
+            logger.warning(f"Fallback related-programs query failed: {e}")
+
+        return ""
 
     def process(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -93,6 +249,16 @@ class DocumentGeneratorAgent:
             # Get system-level stats
             data['stats'] = self.neo4j.get_statistics()
             data['total_programs'] = len(data['programs'])
+
+            # --- Consolidated system-level data ---
+            data['call_graph']            = self._get_call_graph_summary()
+            data['shared_files']          = self._get_shared_data_files()
+            data['shared_copybooks']      = self._get_shared_copybooks()
+            data['domain_groups']         = self._get_domain_groups()
+            data['call_chains']           = self._get_call_chains()
+            data['data_flow_map']         = self._get_data_flow_map()
+            data['cross_domain_links']    = self._get_cross_domain_interactions()
+            data['program_descriptions']  = self._get_program_descriptions()
 
         elif doc_type == 'program_detail' and program_name:
             # Get detailed info for single program
@@ -317,6 +483,202 @@ class DocumentGeneratorAgent:
             logger.error(f"Error fetching jobs for {program_name}: {e}")
             return []
 
+    # ── System-level consolidated queries ────────────────────────────────
+
+    def _get_call_graph_summary(self) -> Dict[str, Any]:
+        """
+        Return hub/leaf/entry-point info for the call graph.
+        - hub_callers:  programs that CALL the most other programs
+        - hub_callees:  programs that are CALLED BY the most other programs
+        - entry_points: programs that nobody calls (top-level / batch drivers)
+        """
+        hub_callers_q = """
+        MATCH (p:CobolProgram)-[:CALLS]->(c:CobolProgram)
+        WITH p, count(c) AS out_count
+        WHERE out_count > 0
+        RETURN p.name AS program, out_count AS calls_out,
+               COALESCE(p.domain, 'Unknown') AS domain
+        ORDER BY out_count DESC
+        LIMIT 15
+        """
+        hub_callees_q = """
+        MATCH (caller:CobolProgram)-[:CALLS]->(p:CobolProgram)
+        WITH p, count(caller) AS in_count
+        WHERE in_count > 0
+        RETURN p.name AS program, in_count AS calls_in,
+               COALESCE(p.domain, 'Unknown') AS domain
+        ORDER BY in_count DESC
+        LIMIT 15
+        """
+        entry_points_q = """
+        MATCH (p:CobolProgram)
+        WHERE NOT EXISTS { MATCH (:CobolProgram)-[:CALLS]->(p) }
+          AND EXISTS { MATCH (p)-[:CALLS]->(:CobolProgram) }
+        RETURN p.name AS program,
+               COALESCE(p.domain, 'Unknown') AS domain,
+               COALESCE(p.complexity_score, 0) AS complexity
+        ORDER BY p.name
+        LIMIT 20
+        """
+        try:
+            return {
+                'hub_callers':  self.neo4j.query(hub_callers_q),
+                'hub_callees':  self.neo4j.query(hub_callees_q),
+                'entry_points': self.neo4j.query(entry_points_q),
+            }
+        except Exception as e:
+            logger.error(f"Error fetching call graph summary: {e}")
+            return {'hub_callers': [], 'hub_callees': [], 'entry_points': []}
+
+    def _get_shared_data_files(self) -> List[Dict]:
+        """
+        Data files accessed by more than one program — the shared / critical
+        data layer of the system.
+        """
+        query = """
+        MATCH (p:CobolProgram)-[r]->(f:DataFile)
+        WHERE type(r) IN ['READS', 'WRITES']
+        WITH f, collect(DISTINCT p.name) AS programs, collect(DISTINCT type(r)) AS ops
+        WHERE size(programs) > 1
+        RETURN f.name AS file_name,
+               programs AS used_by,
+               ops AS operations,
+               size(programs) AS program_count
+        ORDER BY program_count DESC
+        LIMIT 20
+        """
+        try:
+            return self.neo4j.query(query)
+        except Exception as e:
+            logger.error(f"Error fetching shared data files: {e}")
+            return []
+
+    def _get_shared_copybooks(self) -> List[Dict]:
+        """Copybooks included by more than one program — shared data structures."""
+        query = """
+        MATCH (p:CobolProgram)-[:INCLUDES]->(c:Copybook)
+        WITH c, collect(DISTINCT p.name) AS programs
+        WHERE size(programs) > 1
+        RETURN c.name AS copybook,
+               programs AS used_by,
+               size(programs) AS program_count
+        ORDER BY program_count DESC
+        LIMIT 20
+        """
+        try:
+            return self.neo4j.query(query)
+        except Exception as e:
+            logger.error(f"Error fetching shared copybooks: {e}")
+            return []
+
+    def _get_domain_groups(self) -> List[Dict]:
+        """Programs grouped by domain with aggregate metrics."""
+        query = """
+        MATCH (p:CobolProgram)
+        WITH COALESCE(p.domain, 'Unknown') AS domain,
+             collect(p.name) AS programs,
+             count(*) AS count,
+             round(avg(COALESCE(p.complexity_score, 0)), 1) AS avg_complexity,
+             sum(COALESCE(p.loc, 0)) AS total_loc
+        RETURN domain, programs, count, avg_complexity, total_loc
+        ORDER BY count DESC
+        """
+        try:
+            return self.neo4j.query(query)
+        except Exception as e:
+            logger.error(f"Error fetching domain groups: {e}")
+            return []
+
+    def _get_call_chains(self) -> List[Dict]:
+        """
+        Walk CALLS edges up to depth 3 from every entry point.
+        Returns rows: caller → called, with domains, so the LLM can
+        reconstruct end-to-end business flows.
+        """
+        query = """
+        MATCH (entry:CobolProgram)
+        WHERE NOT EXISTS { MATCH (:CobolProgram)-[:CALLS]->(entry) }
+        MATCH chain = (entry)-[:CALLS*1..3]->(leaf:CobolProgram)
+        WITH entry, leaf, [n IN nodes(chain) | n.name] AS path,
+             [n IN nodes(chain) | COALESCE(n.domain, 'Unknown')] AS domains
+        RETURN entry.name AS entry_point,
+               COALESCE(entry.domain, 'Unknown') AS entry_domain,
+               path AS call_path,
+               domains AS path_domains,
+               leaf.name AS leaf_program
+        LIMIT 60
+        """
+        try:
+            return self.neo4j.query(query)
+        except Exception as e:
+            logger.error(f"Error fetching call chains: {e}")
+            return []
+
+    def _get_data_flow_map(self) -> List[Dict]:
+        """
+        For every data file: which programs READ it and which WRITE it.
+        Gives the LLM enough to narrate input → processing → output flows.
+        """
+        query = """
+        MATCH (p:CobolProgram)-[r]->(f:DataFile)
+        WHERE type(r) IN ['READS', 'WRITES']
+        WITH f,
+             [p2 IN [(p2)-[:READS]->(f) | p2.name] | p2] AS readers,
+             [p2 IN [(p2)-[:WRITES]->(f) | p2.name] | p2] AS writers
+        RETURN f.name AS file_name,
+               readers AS readers,
+               writers AS writers
+        ORDER BY size(readers) + size(writers) DESC
+        LIMIT 25
+        """
+        try:
+            return self.neo4j.query(query)
+        except Exception as e:
+            logger.error(f"Error fetching data flow map: {e}")
+            return []
+
+    def _get_cross_domain_interactions(self) -> List[Dict]:
+        """
+        CALLS relationships where caller and callee are in different domains.
+        These are the seams / coupling points between business areas.
+        """
+        query = """
+        MATCH (a:CobolProgram)-[:CALLS]->(b:CobolProgram)
+        WHERE COALESCE(a.domain, 'Unknown') <> COALESCE(b.domain, 'Unknown')
+        RETURN a.name AS caller,
+               COALESCE(a.domain, 'Unknown') AS caller_domain,
+               b.name AS callee,
+               COALESCE(b.domain, 'Unknown') AS callee_domain
+        ORDER BY a.name
+        LIMIT 30
+        """
+        try:
+            return self.neo4j.query(query)
+        except Exception as e:
+            logger.error(f"Error fetching cross-domain interactions: {e}")
+            return []
+
+    def _get_program_descriptions(self) -> List[Dict]:
+        """
+        Collect business_logic + description fields from all programs.
+        Used by the LLM to extract and consolidate key business rules.
+        """
+        query = """
+        MATCH (p:CobolProgram)
+        WHERE p.business_logic IS NOT NULL OR p.description IS NOT NULL
+        RETURN p.name AS name,
+               COALESCE(p.domain, 'Unknown') AS domain,
+               p.business_logic AS business_logic,
+               p.description AS description
+        ORDER BY p.name
+        LIMIT 50
+        """
+        try:
+            return self.neo4j.query(query)
+        except Exception as e:
+            logger.error(f"Error fetching program descriptions: {e}")
+            return []
+
     def _generate_technical_documentation(self, doc_type: str, data: Dict) -> str:
         """Generate technical documentation using LLM"""
 
@@ -327,108 +689,426 @@ class DocumentGeneratorAgent:
         else:
             raise ValueError(f"Unknown doc_type: {doc_type}")
 
+    # ── LLM helper: invoke with a fallback message ──────────────────────
+    def _llm_or_fallback(self, prompt: str, fallback: str) -> str:
+        try:
+            return self.llm.invoke(prompt).content.strip()
+        except Exception as e:
+            logger.error(f"LLM call failed: {e}")
+            return fallback
+
     def _generate_system_documentation(self, data: Dict) -> str:
-        """Generate system-wide technical documentation with program details"""
+        """
+        Generate a consolidated system-level document.
+        Structure:
+          1.  Architecture Narrative          (LLM)
+          2.  End-to-End Business Flows       (LLM — new)
+          3.  Data Flow Summary               (LLM — new)
+          4.  Risk & Impact                   (LLM — new)
+          5.  Key Business Rules              (LLM — new)
+          6.  System Statistics
+          7.  Domain Breakdown
+          8.  Call-Graph Analysis
+          9.  Shared Data Layer
+          10. Shared Copybooks
+          11. Complexity Hotspots
+          12. Program Catalog
+        """
 
-        programs = data.get('programs', [])
-        stats = data.get('stats', {})
+        programs             = data.get('programs', [])
+        stats                = data.get('stats', {})
+        call_graph           = data.get('call_graph', {})
+        shared_files         = data.get('shared_files', [])
+        shared_cbs           = data.get('shared_copybooks', [])
+        domain_groups        = data.get('domain_groups', [])
+        call_chains          = data.get('call_chains', [])
+        data_flow_map        = data.get('data_flow_map', [])
+        cross_domain_links   = data.get('cross_domain_links', [])
+        program_descriptions = data.get('program_descriptions', [])
 
-        # Check enrichment status
-        enriched_count = sum(1 for p in programs if p.get('domain') not in ['Not Enriched', None])
-        not_enriched_count = len(programs) - enriched_count
+        enriched_count      = sum(1 for p in programs if p.get('domain') not in ['Not Enriched', None])
+        not_enriched_count  = len(programs) - enriched_count
+        total_loc           = sum(p.get('loc') or 0 for p in programs)
+        total_relationships = stats.get('total_relationships', 0)
+
+        entry_pts    = call_graph.get('entry_points', [])
+        hub_callers  = call_graph.get('hub_callers', [])
+        hub_callees  = call_graph.get('hub_callees', [])
+
+        # ═══════════════════════════════════════════════════════════════
+        # Pre-format context strings reused across multiple prompts
+        # ═══════════════════════════════════════════════════════════════
+        domain_summary = "\n".join(
+            f"  - {g['domain']}: {g['count']} programs, avg complexity {g['avg_complexity']}, {g['total_loc']} total LOC"
+            for g in domain_groups
+        ) or "  - No domain data available"
+
+        call_graph_summary = (
+            f"Entry points (called by nobody): {[e['program'] for e in entry_pts[:10]]}\n"
+            f"Most outbound calls: {[(h['program'], h['calls_out']) for h in hub_callers[:5]]}\n"
+            f"Most inbound calls:  {[(h['program'], h['calls_in'])  for h in hub_callees[:5]]}"
+        )
+
+        shared_files_summary = "\n".join(
+            f"  - {f['file_name']}: used by {f['program_count']} programs ({', '.join(f['used_by'][:5])})"
+            for f in shared_files[:10]
+        ) or "  - No shared data files found"
+
+        shared_cbs_summary = "\n".join(
+            f"  - {c['copybook']}: included by {c['program_count']} programs"
+            for c in shared_cbs[:10]
+        ) or "  - No shared copybooks found"
+
+        call_chains_text = "\n".join(
+            f"  {' → '.join(row['call_path'])}   (domains: {' → '.join(row['path_domains'])})"
+            for row in call_chains[:30]
+        ) or "  - No call chains found"
+
+        data_flow_text = "\n".join(
+            f"  - {row['file_name']}:  written by {row['writers'] or ['(none)']}  |  read by {row['readers'] or ['(none)']}"
+            for row in data_flow_map[:20]
+        ) or "  - No data flow information found"
+
+        cross_domain_text = "\n".join(
+            f"  - {row['caller']} [{row['caller_domain']}] → {row['callee']} [{row['callee_domain']}]"
+            for row in cross_domain_links[:20]
+        ) or "  - No cross-domain calls detected"
+
+        descriptions_text = "\n".join(
+            f"  - {row['name']} [{row['domain']}]: {row.get('business_logic') or row.get('description') or 'N/A'}"
+            for row in program_descriptions[:40]
+        ) or "  - No program descriptions available"
+
+        # ═══════════════════════════════════════════════════════════════
+        # LLM calls — 5 focused prompts, each with a single job
+        # ═══════════════════════════════════════════════════════════════
+
+        # 1. Architecture Narrative
+        narrative = self._llm_or_fallback(
+            f"""You are a technical architect documenting a legacy COBOL system.
+Write a concise but insightful **architecture narrative** (4-6 paragraphs) that explains:
+- What this system does as a whole (infer from domain groups and program names)
+- How programs are organised by domain/function
+- How the call graph connects them (entry points → hubs → leaves)
+- What the shared data files and copybooks tell us about coupling
+- Any structural risks or observations (e.g. tightly-coupled hubs, orphan programs)
+
+Use ONLY the facts below. Do not invent program names or relationships.
+
+DOMAIN GROUPS:
+{domain_summary}
+
+CALL GRAPH:
+{call_graph_summary}
+
+SHARED DATA FILES (accessed by >1 program):
+{shared_files_summary}
+
+SHARED COPYBOOKS (included by >1 program):
+{shared_cbs_summary}
+
+TOTAL PROGRAMS: {len(programs)} | TOTAL LOC: {total_loc} | TOTAL RELATIONSHIPS: {total_relationships}
+""",
+            "Architecture narrative could not be generated. See the sections below for system-level details."
+        )
+
+        # ── Vector-search enrichment for sections 2 & 5 ──────────────────
+        # One call per theme set; results are spliced into the prompts only
+        # when the vector index is available — otherwise the prompts work
+        # fine with the graph-based context alone.
+        flow_vector_ctx = self._semantic_enrich([
+            "transaction processing flow",
+            "account enquiry and lookup",
+            "batch settlement and reconciliation",
+            "card validation and verification",
+            "customer and account management",
+        ], k=4)
+
+        rules_vector_ctx = self._semantic_enrich([
+            "validation and error handling rules",
+            "account and balance rules",
+            "transaction posting and limits",
+            "card and customer verification",
+            "file processing and data integrity",
+        ], k=4)
+
+        # 2. End-to-End Business Flows
+        business_flows = self._llm_or_fallback(
+            f"""You are a business analyst documenting a legacy COBOL system for stakeholders.
+Using the call chains and program summaries below, identify and describe 3-5 end-to-end business flows (e.g. "Transaction Processing", "Account Enquiry", "Batch Settlement").
+
+For each flow:
+- Give it a clear business name
+- Describe what happens in plain language (no code)
+- List the programs involved in order
+- Note which domain each step belongs to
+
+Use ONLY the data below. Infer business meaning from program names and domain labels. Do not invent programs.
+
+CALL CHAINS (entry point → ... → leaf, with domains):
+{call_chains_text}
+
+DOMAIN GROUPS:
+{domain_summary}
+{(chr(10) + flow_vector_ctx) if flow_vector_ctx else ''}
+""",
+            "Business flow analysis could not be generated. Refer to the Call-Graph Analysis section for program relationships."
+        )
+
+        # 3. Data Flow Summary
+        data_flow_summary = self._llm_or_fallback(
+            f"""You are a business analyst documenting data movement in a legacy COBOL system.
+Using the data below, describe how data flows through the system in plain language.
+
+For each significant data file:
+- What does it represent (infer from the file name)?
+- Which programs produce/write data into it?
+- Which programs consume/read data from it?
+- What does that tell us about the processing sequence (input → processing → output)?
+
+Group related files into logical flows where possible. Write 3-5 paragraphs. Do not invent file names or programs.
+
+DATA FLOW MAP (file: writers → readers):
+{data_flow_text}
+
+SHARED DATA FILES (accessed by >1 program):
+{shared_files_summary}
+""",
+            "Data flow analysis could not be generated. Refer to the Shared Data Layer section for file-level details."
+        )
+
+        # 4. Risk & Impact
+        risk_summary = self._llm_or_fallback(
+            f"""You are a risk analyst reviewing a legacy COBOL system for a stakeholder briefing.
+Identify and explain the top risks based on the facts below. For each risk:
+- Name the risk clearly
+- Explain why it matters to the business
+- Identify the specific programs or files involved
+- Suggest what should be investigated or mitigated
+
+Focus on: single points of failure, tightly-coupled domains, high-complexity programs that many others depend on, and shared data files that if corrupted would affect many processes.
+
+Write as a prioritised list (highest risk first). Be concise — 1-3 sentences per risk. Do not invent data.
+
+HUB PROGRAMS (most called — if these fail, many processes stop):
+{chr(10).join(f"  - {h['program']}: called by {h['calls_in']} programs [{h['domain']}]" for h in hub_callees[:10]) or "  - None"}
+
+CROSS-DOMAIN CALLS (coupling between business areas):
+{cross_domain_text}
+
+SHARED DATA FILES:
+{shared_files_summary}
+
+HIGH-COMPLEXITY PROGRAMS (score ≥ 70):
+{chr(10).join(f"  - {p.get('program_name')}: complexity {p.get('complexity') or 0}, {p.get('loc') or 0} LOC" for p in sorted(programs, key=lambda x: x.get('complexity') or 0, reverse=True)[:10] if (p.get('complexity') or 0) >= 70) or "  - None"}
+""",
+            "Risk analysis could not be generated. Refer to the Complexity Hotspots and Shared Data Layer sections."
+        )
+
+        # 5. Key Business Rules
+        business_rules = self._llm_or_fallback(
+            f"""You are a business analyst extracting key business rules from a legacy COBOL system.
+Read the program descriptions and business logic below. Extract and consolidate the distinct business rules the system enforces.
+
+Group rules by theme (e.g. "Validation Rules", "Account Rules", "Transaction Rules").
+For each rule:
+- State the rule clearly in plain business language
+- Note which program(s) enforce it
+
+Write as a grouped list. Use ONLY information from the descriptions below. Do not invent rules.
+
+PROGRAM DESCRIPTIONS AND BUSINESS LOGIC:
+{descriptions_text}
+{(chr(10) + rules_vector_ctx) if rules_vector_ctx else ''}
+""",
+            "Business rules extraction could not be generated. Refer to individual program documentation for rule details."
+        )
+
+        # ═══════════════════════════════════════════════════════════════
+        # Assemble the markdown document
+        # ═══════════════════════════════════════════════════════════════
 
         enrichment_warning = ""
         if not_enriched_count > 0:
-            enrichment_warning = f"""
-> ⚠️ **ENRICHMENT STATUS**: {not_enriched_count} out of {len(programs)} programs have not been enriched yet.
-> These programs show "Domain: Not Enriched" and have limited metadata.
-> The LLM will analyze source code directly to generate documentation for these programs.
->
-> **Recommendation**: Run the enrichment agent on your COBOL files to get comprehensive metadata including:
-> - Business domain classification
-> - Complexity scoring
-> - Business logic extraction
-> - LOC counts
-"""
+            enrichment_warning = (
+                f"\n> ⚠️ **ENRICHMENT STATUS**: {not_enriched_count} of {len(programs)} programs have not been "
+                f"enriched yet. Run the enrichment agent to populate domain, complexity, and business-logic metadata.\n"
+            )
 
-        md = f"""# COBOL System Technical Documentation
+        md = f"""# COBOL System — Consolidated Technical Overview
 
-**Document Type:** Technical Specification & Reference Guide
+**Document Type:** System Architecture & Reference Guide
 **Generated:** {data['generation_date']}
-**Total Programs Documented:** {len(programs)}
-**Enriched Programs:** {enriched_count} / {len(programs)}
-**Purpose:** Detailed technical reference for developers and business analysts
-
+**Programs in scope:** {len(programs)}  |  **Total LOC:** {total_loc}  |  **Enriched:** {enriched_count}/{len(programs)}
 {enrichment_warning}
 ---
 
 ## Table of Contents
 
-1. [System Overview](#system-overview)
-2. [Program Catalog](#program-catalog)
-3. [Detailed Program Specifications](#detailed-program-specifications)
+1. [Architecture Narrative](#1-architecture-narrative)
+2. [End-to-End Business Flows](#2-end-to-end-business-flows)
+3. [Data Flow Summary](#3-data-flow-summary)
+4. [Risk & Impact](#4-risk--impact)
+5. [Key Business Rules](#5-key-business-rules)
+6. [System Statistics](#6-system-statistics)
+7. [Domain Breakdown](#7-domain-breakdown)
+8. [Call-Graph Analysis](#8-call-graph-analysis)
+9. [Shared Data Layer](#9-shared-data-layer)
+10. [Shared Copybooks](#10-shared-copybooks)
+11. [Complexity Hotspots](#11-complexity-hotspots)
+12. [Program Catalog](#12-program-catalog)
 
 ---
 
-## 1. System Overview
+## 1. Architecture Narrative
 
-This documentation provides comprehensive technical details for the COBOL system components. Each program is documented with:
+{narrative}
 
-- **Functional Purpose**: What the program does
-- **Business Logic**: Key business rules and processes
-- **Dependencies**: Programs it calls and programs that call it
-- **Data Operations**: Files read and written
-- **Internal Structure**: Procedures and paragraphs
-- **Complexity Metrics**: Code complexity and size
+---
 
-### System Statistics
+## 2. End-to-End Business Flows
 
-| Metric | Count |
+{business_flows}
+
+---
+
+## 3. Data Flow Summary
+
+{data_flow_summary}
+
+---
+
+## 4. Risk & Impact
+
+{risk_summary}
+
+---
+
+## 5. Key Business Rules
+
+{business_rules}
+
+---
+
+## 6. System Statistics
+
+| Metric | Value |
 |--------|-------|
-| Total Programs | {stats['nodes'].get('CobolProgram', 0)} |
-| Documented Programs | {len(programs)} |
+| Total Programs (in graph) | {stats['nodes'].get('CobolProgram', 0)} |
+| Programs in this report | {len(programs)} |
+| Total Lines of Code | {total_loc} |
 | Total Data Files | {stats['nodes'].get('DataFile', 0)} |
+| Total Copybooks | {stats['nodes'].get('Copybook', 0)} |
 | Total Procedures | {stats['nodes'].get('Procedure', 0)} |
+| Total Relationships | {total_relationships} |
+| Shared Data Files (>1 program) | {len(shared_files)} |
+| Shared Copybooks (>1 program) | {len(shared_cbs)} |
+| Entry-point Programs | {len(entry_pts)} |
 
 ---
 
-## 2. Program Catalog
+## 7. Domain Breakdown
 
-Quick reference table of all documented programs:
-
-| Program Name | Domain | Complexity | LOC | Calls Out | Called By | Files Read | Files Written |
-|--------------|--------|------------|-----|-----------|-----------|------------|---------------|
 """
+        if domain_groups:
+            md += "| Domain | Programs | Avg Complexity | Total LOC |\n"
+            md += "|--------|----------|----------------|-----------|\n"
+            for g in domain_groups:
+                md += f"| {g['domain']} | {g['count']} | {g['avg_complexity']} | {g['total_loc']} |\n"
+            md += "\n"
+            for g in domain_groups:
+                prog_list = ", ".join(f"`{p}`" for p in sorted(g['programs']))
+                md += f"**{g['domain']}:** {prog_list}\n\n"
+        else:
+            md += "No domain information available.\n\n"
 
-        # Add program catalog
-        for prog in programs:
-            md += f"| {prog.get('program_name', 'N/A')} "
-            md += f"| {prog.get('domain', 'N/A')} "
-            md += f"| {prog.get('complexity') or 0} "
-            md += f"| {prog.get('loc') or 0} "
-            md += f"| {prog.get('calls_out') or 0} "
-            md += f"| {prog.get('calls_in') or 0} "
-            md += f"| {prog.get('files_read') or 0} "
-            md += f"| {prog.get('files_written') or 0} |\n"
+        # ── 8. Call graph ──────────────────────────────────────────────
+        md += "---\n\n## 8. Call-Graph Analysis\n\n"
 
-        md += "\n---\n\n## 3. Detailed Program Specifications\n\n"
-        md += "The following sections provide detailed documentation for each program.\n\n"
+        if entry_pts:
+            md += "### Entry Points\n\nThese programs are not called by any other program — they are likely batch drivers or top-level orchestrators.\n\n"
+            md += "| Program | Domain | Complexity |\n|---------|--------|------------|\n"
+            for e in entry_pts:
+                md += f"| `{e['program']}` | {e['domain']} | {int(e['complexity'])} |\n"
+            md += "\n"
+        else:
+            md += "### Entry Points\n\nNo entry points detected (every program is called by at least one other).\n\n"
 
-        # Generate detailed docs for each program
-        for idx, prog in enumerate(programs, 1):
-            prog_name = prog.get('program_name', '')
-            copybooks = self._get_program_copybooks(prog_name) if prog_name else []
-            jobs = self._get_program_jobs(prog_name) if prog_name else []
-            md += self._generate_single_program_doc(prog, idx, copybooks=copybooks, jobs=jobs)
-            md += "\n---\n\n"
+        if hub_callers:
+            md += "### Most Outbound Calls (orchestrators / drivers)\n\n"
+            md += "| Program | Calls Out | Domain |\n|---------|-----------|--------|\n"
+            for h in hub_callers:
+                md += f"| `{h['program']}` | {h['calls_out']} | {h['domain']} |\n"
+            md += "\n"
+
+        if hub_callees:
+            md += "### Most Inbound Calls (shared services / utilities)\n\n"
+            md += "| Program | Called By | Domain |\n|---------|----------|--------|\n"
+            for h in hub_callees:
+                md += f"| `{h['program']}` | {h['calls_in']} | {h['domain']} |\n"
+            md += "\n"
+
+        # ── 9. Shared data files ──────────────────────────────────────
+        md += "---\n\n## 9. Shared Data Layer\n\n"
+        if shared_files:
+            md += "These data files are accessed by more than one program. They represent the shared state of the system and are key integration points.\n\n"
+            md += "| Data File | Programs Using It | Operations |\n|-----------|-------------------|-------------|\n"
+            for f in shared_files:
+                progs = ", ".join(f"`{p}`" for p in f['used_by'])
+                ops   = ", ".join(f['operations'])
+                md += f"| `{f['file_name']}` | {progs} | {ops} |\n"
+            md += "\n"
+        else:
+            md += "No shared data files detected — programs appear to operate on independent data sets.\n\n"
+
+        # ── 10. Shared copybooks ──────────────────────────────────────
+        md += "---\n\n## 10. Shared Copybooks\n\n"
+        if shared_cbs:
+            md += "Copybooks included by multiple programs define shared data structures across the system.\n\n"
+            md += "| Copybook | Included By | Program Count |\n|----------|-------------|---------------|\n"
+            for c in shared_cbs:
+                progs = ", ".join(f"`{p}`" for p in c['used_by'])
+                md += f"| `{c['copybook']}` | {progs} | {c['program_count']} |\n"
+            md += "\n"
+        else:
+            md += "No shared copybooks detected.\n\n"
+
+        # ── 11. Complexity hotspots ───────────────────────────────────
+        md += "---\n\n## 11. Complexity Hotspots\n\n"
+        high_complexity = [p for p in sorted(programs, key=lambda p: p.get('complexity') or 0, reverse=True)
+                           if (p.get('complexity') or 0) >= 70][:10]
+        if high_complexity:
+            md += "The following programs have a complexity score ≥ 70 and should be prioritised for refactoring or test coverage.\n\n"
+            md += "| Program | Domain | Complexity | LOC | Calls Out | Called By |\n"
+            md += "|---------|--------|------------|-----|-----------|----------|\n"
+            for p in high_complexity:
+                md += (f"| `{p.get('program_name', 'N/A')}` | {p.get('domain', 'N/A')} "
+                       f"| {p.get('complexity') or 0} | {p.get('loc') or 0} "
+                       f"| {p.get('calls_out') or 0} | {p.get('calls_in') or 0} |\n")
+            md += "\n"
+        else:
+            md += "No programs exceed the complexity threshold of 70.\n\n"
+
+        # ── 12. Program catalog (quick-reference only) ───────────────
+        md += "---\n\n## 12. Program Catalog\n\n"
+        md += "Quick-reference table of all programs in scope. For detailed per-program documentation use the **Single Program** mode.\n\n"
+        md += "| # | Program | Domain | Complexity | LOC | Calls Out | Called By | Files R | Files W |\n"
+        md += "|---|---------|--------|------------|-----|-----------|----------|---------|----------|\n"
+        for i, prog in enumerate(programs, 1):
+            md += (f"| {i} | `{prog.get('program_name', 'N/A')}` | {prog.get('domain', 'N/A')} "
+                   f"| {prog.get('complexity') or 0} | {prog.get('loc') or 0} "
+                   f"| {prog.get('calls_out') or 0} | {prog.get('calls_in') or 0} "
+                   f"| {prog.get('files_read') or 0} | {prog.get('files_written') or 0} |\n")
 
         md += f"""
+
+---
+
 **END OF DOCUMENT**
 
-*Generated by COBOL Agentic Knowledge Graph - {data['generation_date']}*
-*This documentation is automatically generated from the knowledge graph and enriched with LLM analysis.*
+*Generated by COBOL Agentic Knowledge Graph — {data['generation_date']}*
+*For per-program deep dives use Single Program mode.*
 """
-
         return md
 
     @staticmethod
@@ -560,6 +1240,14 @@ SOURCE CODE SNIPPET (first 2000 characters):
         if complexity >= 70:
             complexity_instruction = f"\nIMPORTANT: This program has a HIGH complexity score of {complexity}. Flag this prominently in the Technical Notes section — explain likely complexity drivers and recommend refactoring or test coverage.\n"
 
+        # --- Related programs via vector search (+ graph fallback) ---
+        related_programs_context = self._get_related_programs(
+            program_name,
+            domain=prog_summary.get('domain'),
+            summary=prog_details.get('summary'),
+            business_logic=business_logic,
+        )
+
         # Use LLM to generate comprehensive documentation
         prompt = f"""You are a technical writer creating detailed COBOL program documentation for developers and business analysts.
 
@@ -577,6 +1265,7 @@ CALLED BY ({len(dependencies.get('called_by', []))} programs):
 {procedures_context}
 {copybooks_context}
 {jobs_context}
+{related_programs_context}
 {complexity_instruction}
 Generate documentation with these sections:
 
@@ -595,7 +1284,7 @@ Generate documentation with these sections:
 [Describe ALL data files it reads/writes and why — include both graph-tracked and source-referenced files. Use a table with columns: File, Organization/Access, Role]
 
 #### Dependencies
-[Explain programs it depends on and which depend on it. Note copybooks. Note any external runtime calls like CEE3ABD if present in source. Note JCL job linkage.]
+[Explain programs it depends on and which depend on it. Note copybooks. Note any external runtime calls like CEE3ABD if present in source. Note JCL job linkage. If RELATED PROGRAMS context is provided, add a brief "Related Programs" sub-bullet noting programs with similar functionality and why they are relevant.]
 
 #### Technical Notes
 [Complexity concerns, performance considerations, maintenance notes. If complexity is high, flag prominently with specific drivers.]
